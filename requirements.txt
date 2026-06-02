@@ -1,0 +1,3 @@
+# Runtime dependencies. Everything else the agent uses is Python stdlib.
+# Requires Python 3.10+ (uses X | None / tuple[str, ...] annotations).
+Pillow>=10.0

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Forex Agent Live Chart</title>
+    <link rel="stylesheet" href="/styles.css?v=story-context-3" />
+    <script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
+  </head>
+  <body>
+    <header class="toolbar">
+      <div>
+        <h1>Forex Agent Live Chart</h1>
+        <p>OANDA candles with rule, DeepSeek, and Gemma overlays.</p>
+      </div>
+      <label>
+        Instrument
+        <select id="instrument"></select>
+      </label>
+      <label>
+        Timeframe
+        <select id="granularity">
+          <option value="M15">M15 execution</option>
+          <option value="H1">H1 refinement</option>
+          <option value="H4">H4 narrative</option>
+        </select>
+      </label>
+      <label>
+        Refresh
+        <select id="refreshSeconds">
+          <option value="15">15s</option>
+          <option value="30" selected>30s</option>
+          <option value="60">60s</option>
+          <option value="300">5m</option>
+        </select>
+      </label>
+      <label>
+        Theme
+        <select id="theme">
+          <option value="light" selected>Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+      <label>
+        Zones
+        <select id="zoneMode">
+          <option value="actionable" selected>Actionable only</option>
+          <option value="context">Include context</option>
+        </select>
+      </label>
+      <button id="refreshButton">Refresh now</button>
+    </header>
+
+    <main>
+      <section class="status-panel">
+        <div><span>Bias</span><strong id="bias">-</strong></div>
+        <div><span>Status</span><strong id="status">-</strong></div>
+        <div><span>Latest</span><strong id="latestPrice">-</strong></div>
+        <div><span>Next Check</span><strong id="nextCheck">-</strong></div>
+        <div><span>Freshness</span><strong id="freshness">-</strong></div>
+      </section>
+
+      <section class="chart-shell">
+        <div id="chart"></div>
+        <div id="overlayLayer"></div>
+      </section>
+
+      <section class="details">
+        <h2>Agent Notes</h2>
+        <p id="action">Loading...</p>
+        <div id="signals" class="signals"></div>
+        <div class="legend">
+          <span class="legend-item demand">Demand / BUY</span>
+          <span class="legend-item supply">Supply / SELL</span>
+          <span class="legend-item entry">Entry Zone</span>
+          <span class="legend-item sequence">Sweep + BOS Markers</span>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js?v=story-context-3"></script>
+  </body>
+</html>

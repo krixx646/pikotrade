@@ -1,0 +1,4 @@
+# One RSS/Atom feed URL per line.
+# Copy this file to fundamental_feeds.txt and add the feeds you want the agent to read.
+# Example:
+# https://www.forexlive.com/feed/news/

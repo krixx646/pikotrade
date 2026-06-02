@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Real secret/config env files (the *.example templates ARE committed)
+.env
+.env.gemini
+.env.openai
+.env.deepseek
+.env.alerts
+.env.cloudflare
+.env.ollama
+
+# Keys (defensive - never commit private/public keys)
+*.key
+*.pub
+keys/
+
+# Generated outputs / artifacts
+outputs/
+
+# Local fundamentals data (template is committed)
+fundamental_feeds.txt
