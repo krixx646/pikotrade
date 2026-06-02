@@ -33,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         help="Minimum minutes between DeepSeek runs when --use-ai is enabled.",
     )
     parser.add_argument("--alert-channel", default="console", choices=["console", "windows-msg", "telegram"])
+    parser.add_argument(
+        "--whatsapp-push",
+        action="store_true",
+        help="Push forward-test signal changes to WhatsApp via the PicoClaw token-free /send endpoint. "
+        "Also enabled when PICOTRADE_WHATSAPP_PUSH=1.",
+    )
     return parser.parse_args()
 
 
@@ -72,6 +78,8 @@ def run_cycle(args: argparse.Namespace) -> None:
     run_command(["scripts/deliver_alerts.py", "--channel", args.alert_channel])
     if not args.no_forward_test:
         run_command(["scripts/forward_test_signals.py"])
+        if args.whatsapp_push or os.environ.get("PICOTRADE_WHATSAPP_PUSH") == "1":
+            run_command(["scripts/whatsapp_push.py"])
     run_command(["scripts/export_orchestration_state.py"])
     run_command(["scripts/export_tradingview_pine.py"])
 
