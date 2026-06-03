@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import Counter
 import json
@@ -84,12 +84,6 @@ REGIME_RANGE_MINIMUM = 4.8
 REGIME_RANGE_MAX_DISTANCE_RANGES = 1.5
 REGIME_RANGE_OVERLAP_PENALTY = 0.4
 SCORE_DUPLICATE_ROUTES = {"DYNAMIC_SCORE", "REGIME_RANGE"}
-# Routes that re-fire repeatedly during a trend (impulse continuation). Limit how often a
-# new entry can open on the same instrument+side so a single move can't stack a dozen
-# near-identical signals. The M5 sibling is built from the base, so blocking the base
-# blocks both.
-COOLDOWN_ROUTES = {"MOMENTUM"}
-DEFAULT_MOMENTUM_COOLDOWN_MINUTES = 90
 PARTIAL_TARGET_R = 1.5
 PARTIAL_FRACTION = 0.5
 RUNNER_TRAIL_R = 1.0
@@ -132,7 +126,6 @@ def run_forward_testing(
     timeout_bars: int = 48,
     max_signal_age_minutes: int = 30,
     track_m5_variant: bool = True,
-    momentum_cooldown_minutes: int = DEFAULT_MOMENTUM_COOLDOWN_MINUTES,
 ) -> dict[str, object]:
     tests = _load_json(tests_path)
     diagnostics: list[dict[str, object]] = []
@@ -153,9 +146,6 @@ def run_forward_testing(
             continue
         if _duplicates_active_test(candidate, tests):
             diagnostics.append(_candidate_diagnostic(candidate, "duplicates_existing_active_route"))
-            continue
-        if _within_signal_cooldown(candidate, tests, now_dt, momentum_cooldown_minutes):
-            diagnostics.append(_candidate_diagnostic(candidate, "route_cooldown_active"))
             continue
         key = _candidate_key(candidate)
         if key in tests:
@@ -322,35 +312,6 @@ def _duplicates_active_test(candidate: SignalCandidate, tests: dict[str, object]
             continue
         existing_entry = _float_or_none(value.get("entry_price"))
         if existing_entry is not None and abs(candidate_entry - existing_entry) <= tolerance:
-            return True
-    return False
-
-
-def _within_signal_cooldown(
-    candidate: SignalCandidate,
-    tests: dict[str, object],
-    now_dt: datetime,
-    cooldown_minutes: int,
-) -> bool:
-    """True if a same route+instrument+side signal opened within the cooldown window.
-
-    Stops a trending move (e.g. MOMENTUM) from stacking many near-identical entries on the
-    same pair/side in a short span. Considers both open and recently-closed tests so a fresh
-    re-entry waits out the window. Only applies to COOLDOWN_ROUTES.
-    """
-    if cooldown_minutes <= 0 or candidate.route not in COOLDOWN_ROUTES:
-        return False
-    cutoff = now_dt - timedelta(minutes=cooldown_minutes)
-    side = candidate.side.upper()
-    for value in tests.values():
-        if not isinstance(value, dict):
-            continue
-        if value.get("route") != candidate.route or value.get("instrument") != candidate.instrument:
-            continue
-        if str(value.get("side", "")).upper() != side:
-            continue
-        stamp = _parse_datetime(str(value.get("signal_time") or value.get("created_at") or ""))
-        if stamp is not None and stamp >= cutoff:
             return True
     return False
 
