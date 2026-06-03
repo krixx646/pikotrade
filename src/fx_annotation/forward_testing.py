@@ -7,6 +7,12 @@ import json
 from fx_annotation.candles import Candle
 from fx_annotation.config import PROJECT_ROOT
 from fx_annotation.bias import detect_bias
+from fx_annotation.htf_momentum import HtfMomentumParams, htf_momentum_signal
+try:  # delete-safe: removing htf_zone.py just disables the HTF_ZONE route, nothing else breaks
+    from fx_annotation.htf_zone import HtfZoneParams, htf_zone_signal
+    HTF_ZONE_AVAILABLE = True
+except Exception:  # pragma: no cover
+    HTF_ZONE_AVAILABLE = False
 from fx_annotation.dynamic_scoring import (
     DynamicScoreSignal,
     best_dynamic_score,
@@ -59,13 +65,30 @@ MOMENTUM_RECENT_EXTREME_WITHIN = 6
 MOMENTUM_SHALLOW_RETRACE = 0.33
 MOMENTUM_DEEP_RETRACE = 0.55
 MOMENTUM_BIAS_LOOKBACK = 120
+# HTF_MOMENTUM route (day-trade): detect an impulse move on H1, hand a tight entry zone to M15
+# so the small M15 stop rides the long HTF continuation for max R. Detection lives in
+# htf_momentum.py (delete-safe). Backtested (Jan-May 2025, 4 pairs, 1pip spread): 195 trades,
+# 75.9% win, +0.641R net/trade, +125R total. Remove this block + _htf_momentum_* + the one
+# extend() line in run_forward_testing to fully remove it.
+HTF_MOMENTUM_ENABLED = True
+# Profile A: target = the H1 impulse high (target_ext=0.0), M15-structure stop, ride to target.
+# Backtest (Jan-May 2025, 4 pairs): 64% win, +0.73R/trade, +140R, 192 trades.
+HTF_MOMENTUM_PARAMS = HtfMomentumParams(impulse_atr_mult=2.0, bias_lookback=80, target_ext=0.0)
+HTF_MOMENTUM_MAX_DISTANCE_RANGES = 4.0
+# HTF_ZONE route (EXPERIMENTAL, delete-safe): H4 bias + H1 SMC zone -> M15 reaction, trailing
+# exit (the config that backtested 83% win / +1.25R per trade - but rare, ~6 trades/4mo).
+# Detection in htf_zone.py. To remove: delete htf_zone.py + backtest_htf_zone.py + this block +
+# the one extend() line in run_forward_testing (the guarded import auto-disables it regardless).
+HTF_ZONE_ENABLED = True
+HTF_ZONE_MAX_DISTANCE_RANGES = 4.0
+HTF_ZONE_PARAMS = HtfZoneParams() if HTF_ZONE_AVAILABLE else None
 
 # Alert hierarchy: routes ranked by their measured edge (2024 backtests, scale-trail exit).
 # Lower rank = higher priority. Used to tier and sort live alerts for OpenClaw + the trader.
 # (rank, label, one-line rationale shown in the alert legend)
 TIER_ORDER: tuple[tuple[int, str, str], ...] = (
-    (1, "PREMIUM", "MOMENTUM impulse-continuation - best edge (55% win, +0.145R gross). Trade these first."),
-    (2, "HIGH", "M15_SIMPLE - net-positive on trendy pairs (BTC, USD_JPY, EUR_JPY)."),
+    (1, "PREMIUM", "HTF_MOMENTUM (H1 day-trade, 76% win / +0.64R net backtest) + MOMENTUM impulse-continuation - best edge. Trade these first."),
+    (2, "HIGH", "HTF_ZONE (H4/H1 SMC reaction, 83% win / +1.25R but rare) + M15_SIMPLE on trendy pairs."),
     (3, "MEDIUM", "DYNAMIC_SCORE - real gross edge, spread-sensitive. Best on a raw-spread account."),
     (4, "LOW", "REGIME_RANGE / relaxed Rule - thin or net-negative blended. Confirmation only."),
     (5, "WATCH", "AI routes (DeepSeek/Gemma) and opportunity variants - observe, do not trade blindly."),
@@ -136,6 +159,8 @@ def run_forward_testing(
     candidates.extend(_dynamic_score_candidates(client, now))
     candidates.extend(_regime_range_candidates(client, now))
     candidates.extend(_momentum_candidates(client, now))
+    candidates.extend(_htf_momentum_candidates(client, now))
+    candidates.extend(_htf_zone_candidates(client, now))
 
     for candidate in candidates:
         if not _fresh_signal(candidate.signal_time, now_dt, max_signal_age_minutes):
@@ -445,9 +470,9 @@ def _route_summary_lines(tests: list[dict[str, object]]) -> list[str]:
 def _route_tier(route: str) -> tuple[int, str]:
     """Map a route name (incl. variants like *_OPPORTUNITY) to its alert tier (rank, label)."""
     r = str(route or "").upper()
-    if r.startswith("MOMENTUM"):
+    if r.startswith("HTF_MOMENTUM") or r.startswith("MOMENTUM"):
         return (1, "PREMIUM")
-    if r.startswith("M15"):
+    if r.startswith("HTF_ZONE") or r.startswith("M15"):
         return (2, "HIGH")
     if r.startswith("DYNAMIC"):
         return (3, "MEDIUM")
@@ -835,6 +860,98 @@ def _momentum_candidate(
         target_reason="Trailing runner (scale-and-trail), no fixed cap.",
         available_r=3.0,
     )
+
+
+def _htf_momentum_candidates(client: OandaClient, signal_time: str) -> list[SignalCandidate]:
+    """HTF_MOMENTUM route: detect an impulse move on H1, enter the tight M15 zone for max R.
+
+    Day-trade angle: the move is found on the 1-hour chart (hours of room), but the entry zone
+    handed to M15 is narrow so the M15 stop is small and the runner can ride the HTF
+    continuation. Detection lives in htf_momentum.py (delete-safe, no circular import).
+    """
+    if not HTF_MOMENTUM_ENABLED:
+        return []
+    candidates: list[SignalCandidate] = []
+    for instrument in DEFAULT_WATCHLIST:
+        h1 = _fetch_h1(client, instrument)
+        sig = htf_momentum_signal(h1, HTF_MOMENTUM_PARAMS)
+        if sig is None:
+            continue
+        pair_value = pair_value_for_instrument(instrument)
+        # Profile A: M15-structure stop = just past the entry-zone edge (room to breathe via the
+        # _stop_loss buffer), NOT the far H1 impulse low. Encode it by pointing sweep_price at the
+        # zone edge so _stop_loss hugs the band instead of the impulse origin.
+        stop_ref = sig.entry_low if sig.side == "BUY" else sig.entry_high
+        entry_px = sig.entry_high if sig.side == "BUY" else sig.entry_low
+        risk = abs(entry_px - stop_ref)
+        planned_r = round(abs(sig.target_price - entry_px) / risk, 2) if risk > 0 else None
+        candidates.append(
+            SignalCandidate(
+                route="HTF_MOMENTUM",
+                instrument=instrument,
+                side=sig.side,
+                status=f"htf_impulse:{sig.strength:.1f}xATR",
+                entry_low=sig.entry_low,
+                entry_high=sig.entry_high,
+                source="H1 impulse continuation -> M15 entry (ride to H1 target)",
+                signal_time=signal_time,
+                sweep_price=round(stop_ref, 5),
+                bos_time=signal_time,
+                notes=(
+                    f"HTF_MOMENTUM: {sig.side} day-trade. {sig.note}. Enter on M15, M15-structure stop, "
+                    f"ride to the H1 impulse target {sig.target_price:g}. Pair value: {pair_value.label}."
+                ),
+                target_price=sig.target_price,
+                target_timeframe="H1",
+                target_reason="H1 impulse high (measured target) - ride 100% to it (Profile A).",
+                available_r=planned_r,
+                entry_timeframe="M15",
+            )
+        )
+    return candidates
+
+
+def _htf_zone_candidates(client: OandaClient, signal_time: str) -> list[SignalCandidate]:
+    """HTF_ZONE route (delete-safe): H4 bias + H1 SMC zone -> M15 reaction, trailing exit.
+
+    Wired exactly as it backtested (zone-edge stop, partial-then-trail). High per-trade quality
+    but low frequency, so it surfaces as a HIGH-tier alert, below the proven PREMIUM momentum.
+    """
+    if not (HTF_ZONE_ENABLED and HTF_ZONE_AVAILABLE):
+        return []
+    candidates: list[SignalCandidate] = []
+    for instrument in DEFAULT_WATCHLIST:
+        h4 = _fetch_h4(client, instrument)
+        h1 = _fetch_h1(client, instrument)
+        sig = htf_zone_signal(h4, h1, HTF_ZONE_PARAMS)
+        if sig is None:
+            continue
+        pair_value = pair_value_for_instrument(instrument)
+        stop_ref = sig.entry_low if sig.side == "BUY" else sig.entry_high
+        candidates.append(
+            SignalCandidate(
+                route="HTF_ZONE",
+                instrument=instrument,
+                side=sig.side,
+                status=f"smc_zone:Q{sig.strength:.0f}",
+                entry_low=sig.entry_low,
+                entry_high=sig.entry_high,
+                source="H4 bias + H1 SMC zone -> M15 reaction",
+                signal_time=signal_time,
+                sweep_price=round(stop_ref, 5),
+                bos_time=signal_time,
+                notes=(
+                    f"HTF_ZONE: {sig.side} SMC day-trade. {sig.note}. Enter the M15 reaction at the H1 zone, "
+                    f"zone-edge stop, bank ~50% at 1.5R then trail. Pair value: {pair_value.label}."
+                ),
+                target_price=None,
+                target_timeframe="fixed",
+                target_reason="Trailing runner (partial then trail), no fixed cap.",
+                available_r=3.0,
+                entry_timeframe="M15",
+            )
+        )
+    return candidates
 
 
 def _regime_range_candidate(
@@ -1304,6 +1421,16 @@ def _strict_live_entry_rejection(
         if not _price_near_zone(candidate, candles, AI_HIGH_VALUE_MAX_DISTANCE_RANGES):
             return "ai_split_opportunity_price_too_far"
         return ""
+    if candidate.route == "HTF_MOMENTUM":
+        # Profile A pullback-continuation: fills on touch, near H1 target (~1-2R), so it
+        # skips the strict 3R / reaction-candle gate. Only require price to be within reach.
+        if not _price_near_zone(candidate, candles, HTF_MOMENTUM_MAX_DISTANCE_RANGES):
+            return "htf_momentum_price_too_far"
+        return ""
+    if candidate.route == "HTF_ZONE":
+        if not _price_near_zone(candidate, candles, HTF_ZONE_MAX_DISTANCE_RANGES):
+            return "htf_zone_price_too_far"
+        return ""
     if candidate.route == "M15_SIMPLE":
         if not _price_near_zone(candidate, candles, M15_SIMPLE_MAX_DISTANCE_RANGES):
             return "m15_simple_price_too_far"
@@ -1490,6 +1617,9 @@ def _new_test(
     }
     return {
         "model": "partial_trail",
+        # Profile A routes ride 100% to the fixed HTF target (no partial/trail); everything else
+        # uses the standard bank-at-1.5R-then-trail model.
+        "exit_model": "ride_target" if candidate.route == "HTF_MOMENTUM" else "partial_trail",
         "route": candidate.route,
         "instrument": candidate.instrument,
         "side": candidate.side,
@@ -1710,6 +1840,10 @@ def _update_partial_trail_test(
         test["last_checked_at"] = now
         return
 
+    if str(test.get("exit_model")) == "ride_target":
+        _manage_ride_target(test, candles, start_index, entry_price, risk, side, timeout_bars, entry_time, now)
+        return
+
     partial_r = float(test.get("partial_r", PARTIAL_TARGET_R))
     partial_fraction = float(test.get("partial_fraction", PARTIAL_FRACTION))
     trail_r = float(test.get("runner_trail_r", RUNNER_TRAIL_R))
@@ -1775,6 +1909,52 @@ def _update_partial_trail_test(
         test["last_checked_at"] = now
         return
 
+    test["last_checked_at"] = now
+
+
+def _manage_ride_target(
+    test: dict[str, object],
+    candles: list[Candle],
+    start_index: int,
+    entry_price: float,
+    risk: float,
+    side: str,
+    timeout_bars: int,
+    entry_time: str,
+    now: str,
+) -> None:
+    """Profile A exit: ride the full position to the fixed H1 target, M15 stop, no partial.
+
+    Win = price reaches ``trade_target_price`` (realized = planned R); loss = M15 stop (-1R);
+    both in one candle = conservatively the stop. Timeout marks at the last close.
+    """
+    target = _float_or_none(test.get("trade_target_price"))
+    stop_loss = float(test.get("stop_loss", 0.0))
+    if target is None:
+        test["last_checked_at"] = now
+        return
+    planned_r = (target - entry_price) / risk if side == "BUY" else (entry_price - target) / risk
+    peak = _float_or_none(test.get("runner_peak")) or entry_price
+    for candle_index in range(start_index, len(candles)):
+        candle = candles[candle_index]
+        peak = max(peak, candle.high) if side == "BUY" else min(peak, candle.low)
+        hit_stop = candle.low <= stop_loss if side == "BUY" else candle.high >= stop_loss
+        hit_target = candle.high >= target if side == "BUY" else candle.low <= target
+        if hit_stop:  # conservative: stop checked first when both touch the same candle
+            test["runner_peak"] = peak
+            _close_partial_trail(test, candle.time.isoformat(), -1.0, -1.0, "loss")
+            test["last_checked_at"] = now
+            return
+        if hit_target:
+            test["runner_peak"] = peak
+            _close_partial_trail(test, candle.time.isoformat(), round(planned_r, 4), round(planned_r, 4), "target_win")
+            test["last_checked_at"] = now
+            return
+    test["runner_peak"] = peak
+    if candles and _bars_since_entry(candles, entry_time) >= timeout_bars:
+        last_close = candles[-1].close
+        mark_r = (last_close - entry_price) / risk if side == "BUY" else (entry_price - last_close) / risk
+        _close_partial_trail(test, candles[-1].time.isoformat(), round(mark_r, 4), round(mark_r, 4), "timeout")
     test["last_checked_at"] = now
 
 
@@ -1900,6 +2080,24 @@ def _fetch_m5(client: OandaClient, instrument: str) -> list[Candle]:
         return []
     try:
         return [candle for candle in client.fetch_candles(instrument, "M5", count=500) if candle.complete]
+    except Exception:
+        return []
+
+
+def _fetch_h1(client: OandaClient, instrument: str) -> list[Candle]:
+    if not instrument:
+        return []
+    try:
+        return [candle for candle in client.fetch_candles(instrument, "H1", count=400) if candle.complete]
+    except Exception:
+        return []
+
+
+def _fetch_h4(client: OandaClient, instrument: str) -> list[Candle]:
+    if not instrument:
+        return []
+    try:
+        return [candle for candle in client.fetch_candles(instrument, "H4", count=200) if candle.complete]
     except Exception:
         return []
 
