@@ -125,6 +125,7 @@ def run_forward_testing(
     rr_values: tuple[float, ...] = (3.0,),
     timeout_bars: int = 48,
     max_signal_age_minutes: int = 30,
+    track_m5_variant: bool = True,
 ) -> dict[str, object]:
     tests = _load_json(tests_path)
     diagnostics: list[dict[str, object]] = []
@@ -165,19 +166,38 @@ def run_forward_testing(
             if opportunity_key in tests:
                 diagnostics.append(_candidate_diagnostic(opportunity, "already_tracking"))
                 continue
-            tests[opportunity_key] = _new_test(opportunity, candles, rr_values, now, m5_candles)
+            opportunity_test = _new_test(opportunity, candles, rr_values, now, m5_candles)
+            tests[opportunity_key] = opportunity_test
+            _maybe_add_m5_sibling(tests, opportunity_test, track_m5_variant)
             diagnostics.append(_candidate_diagnostic(opportunity, "opened_opportunity_forward_test"))
             continue
-        tests[key] = _new_test(candidate, candles, rr_values, now, m5_candles)
+        base_test = _new_test(candidate, candles, rr_values, now, m5_candles)
+        tests[key] = base_test
+        _maybe_add_m5_sibling(tests, base_test, track_m5_variant)
         diagnostics.append(_candidate_diagnostic(candidate, "opened_forward_test"))
 
+    m15_cache: dict[str, list[Candle]] = {}
+    m5_cache: dict[str, list[Candle]] = {}
     for key, test in list(tests.items()):
         if not isinstance(test, dict) or test.get("status") == "closed":
             continue
-        candles = _fetch_m15(client, str(test.get("instrument", "")))
-        if not candles:
-            continue
-        _update_test(test, candles, timeout_bars, now)
+        instrument = str(test.get("instrument", ""))
+        if test.get("timeframe") == "M5":
+            m5c = m5_cache.get(instrument)
+            if m5c is None:
+                m5c = _fetch_m5(client, instrument)
+                m5_cache[instrument] = m5c
+            if not m5c:
+                continue
+            _update_m5_entry_test(test, m5c, timeout_bars * 3, now)
+        else:
+            candles = m15_cache.get(instrument)
+            if candles is None:
+                candles = _fetch_m15(client, instrument)
+                m15_cache[instrument] = candles
+            if not candles:
+                continue
+            _update_test(test, candles, timeout_bars, now)
 
     tests_path.parent.mkdir(parents=True, exist_ok=True)
     tests_path.write_text(json.dumps(tests, indent=2, sort_keys=True), encoding="utf-8")
@@ -1516,6 +1536,136 @@ def _new_test(
         "m5_rr_to_target": m5_plan["m5_rr_to_target"],
         "trail_levels": trail_levels,
     }
+
+
+def _test_key_for(test: dict[str, object]) -> str:
+    """Stable tracking key for an already-built test dict (mirror of _candidate_key)."""
+    zone = f"{float(test.get('entry_low', 0.0)):.5f}-{float(test.get('entry_high', 0.0)):.5f}"
+    return f"{test.get('route', '')}:{test.get('instrument', '')}:{test.get('side', '')}:{zone}"
+
+
+def _m5_sibling_test(base: dict[str, object]) -> dict[str, object] | None:
+    """Build a parallel "scale down to M5" paper trade from a freshly opened M15 test.
+
+    Goal: maximize R via a *better entry*, not reconfirmation. It places the entry deeper
+    in the zone (the midpoint) for a better fill price, while keeping the same wide M15
+    structural stop so the trade still has breathing room. Better entry + same safe stop =
+    smaller risk and more distance to target = more R, without the noise-stop fragility of
+    a tight M5 stop. It fills when price trades down/up to the midpoint (no extra candle
+    confirmation); if price only taps the M15 edge and runs, this variant simply misses that
+    fill (the M15 trade still takes it). Tracked under ``{route}_M5`` (inherits the parent's
+    tier) and managed on M5 candles, so the scoreboard shows M15-edge vs M5-midzone entries.
+    """
+    side = str(base.get("side", ""))
+    if side not in {"BUY", "SELL"}:
+        return None
+    if base.get("status") != "waiting_entry":
+        return None  # only mirror brand-new, not-yet-filled signals
+    entry_low = _float_or_none(base.get("entry_low"))
+    entry_high = _float_or_none(base.get("entry_high"))
+    m15_stop = _float_or_none(base.get("stop_loss"))
+    if entry_low is None or entry_high is None or m15_stop is None:
+        return None
+    entry_mid = round((entry_low + entry_high) / 2.0, 5)
+    risk = abs(entry_mid - m15_stop)
+    if risk <= 0:
+        return None
+    partial_target = _target_price(entry_mid, m15_stop, side, PARTIAL_TARGET_R)
+    target = _float_or_none(base.get("trade_target_price"))
+    rr_to_target = None
+    if target is not None:
+        rr_to_target = round((target - entry_mid) / risk if side == "BUY" else (entry_mid - target) / risk, 2)
+    sibling = dict(base)
+    sibling.update(
+        {
+            "route": f"{base.get('route', '')}_M5",
+            "entry_timeframe": "M5",
+            "timeframe": "M5",
+            "entry_model": "m5_midzone",
+            "status": "waiting_entry",
+            "entry_price": entry_mid,
+            "stop_loss": m15_stop,
+            "risk": round(risk, 5),
+            "m15_fallback_stop": m15_stop,
+            "partial_target_price": round(partial_target, 5),
+            "m15_rr_to_target": rr_to_target,
+            "trail_levels": {
+                "partial_1_5R": round(partial_target, 5),
+                "milestone_3R": round(_target_price(entry_mid, m15_stop, side, 3.0), 5),
+                "note": "M5 variant: deeper mid-zone entry, wide M15 structural stop (room). Bank ~50% at 1.5R, BE after, trail 1R behind peak.",
+            },
+            "partial_taken": False,
+            "partial_time": "",
+            "runner_active": False,
+            "runner_peak": None,
+            "breakeven_active": False,
+            "realized_r": None,
+            "runner_exit_r": None,
+            "outcome": "open",
+            "entry_time": "",
+            "exit_time": "",
+            "targets": {},
+            "source": (str(base.get("source", "")) + " | M5 mid-zone entry variant").strip(" |"),
+            # this row IS the M5 trade; clear the advisory nested M5 plan fields
+            "m5_stop_loss": None,
+            "m5_risk": None,
+            "m5_rr_to_target": None,
+        }
+    )
+    return sibling
+
+
+def _maybe_add_m5_sibling(tests: dict[str, object], base_test: dict[str, object], enabled: bool) -> None:
+    if not enabled:
+        return
+    sibling = _m5_sibling_test(base_test)
+    if sibling is None:
+        return
+    sibling_key = _test_key_for(sibling)
+    if sibling_key not in tests:
+        tests[sibling_key] = sibling
+
+
+def _m5_midzone_fill(test: dict[str, object], m5: list[Candle]) -> str | None:
+    """Fill the M5 variant when price trades to the deeper mid-zone entry — no confirmation.
+
+    Fires on the first M5 candle that touches the pre-computed mid-zone entry price. Returns
+    the fill time, or None until price reaches that level. Re-derivable each cycle, so safe to
+    call repeatedly. If price only taps the shallow M15 edge and runs, this never fills (the
+    M15 trade still takes it) — that is the accepted fills-vs-R trade-off.
+    """
+    entry_price = _float_or_none(test.get("entry_price"))
+    if entry_price is None or not m5:
+        return None
+    start = _first_candle_index_after(m5, str(test.get("monitor_from") or test.get("created_at") or ""))
+    for j in range(start, len(m5)):
+        c = m5[j]
+        if c.low <= entry_price <= c.high:
+            return c.time.isoformat()
+    return None
+
+
+def _update_m5_entry_test(test: dict[str, object], m5: list[Candle], timeout_bars_m5: int, now: str) -> None:
+    """Fill (when price reaches the mid-zone entry) and manage the M5 variant on M5 candles.
+
+    Entry/stop/risk are fixed by the builder (mid-zone entry + wide M15 stop); here we just
+    detect the fill and hand off to the shared partial-trail manager. No reconfirmation.
+    """
+    if test.get("status") == "closed" or not m5:
+        return
+    if test.get("status") == "waiting_entry":
+        fill_time = _m5_midzone_fill(test, m5)
+        if fill_time is None:
+            test["last_checked_at"] = now
+            return
+        if _float_or_none(test.get("risk")) in (None, 0.0):
+            test["last_checked_at"] = now
+            return
+        test["status"] = "active"
+        test["entry_time"] = fill_time
+        test["runner_active"] = True
+        test["runner_peak"] = test.get("entry_price")
+    _update_partial_trail_test(test, m5, timeout_bars_m5, now)
 
 
 def _update_test(test: dict[str, object], candles: list[Candle], timeout_bars: int, now: str) -> None:

@@ -141,19 +141,28 @@ def _plan_block(test: dict) -> list[str]:
     trail = test.get("trail_levels") if isinstance(test.get("trail_levels"), dict) else {}
 
     tp_text = f"{_fmt_num(target)} ({tf})" if target is not None else "trail / open-ended"
+    is_m5_variant = str(test.get("timeframe")) == "M5" or str(test.get("entry_model")) == "m5_midzone"
     lines: list[str] = []
     if entry_low is not None and entry_high is not None:
         lines.append(f"Zone: {_fmt_num(entry_low)} - {_fmt_num(entry_high)}")
-    lines.append(
-        f"M15: entry {entry} | SL {sl} | TP {tp_text}"
-        + (f" | ~{m15_rr}R" if m15_rr is not None else "")
-    )
-    if m5_sl is not None:
+    if is_m5_variant:
+        # This row IS the M5 trade: deeper mid-zone entry, wide M15 structural stop.
         lines.append(
-            f"M5:  entry {entry} | tighter SL {_fmt_num(m5_sl)}"
-            + (f" | ~{m5_rr}R to same TP" if m5_rr is not None else "")
-            + " (more R, smaller stop)"
+            f"M5 entry (mid-zone): {entry} | SL {sl} (M15 structure) | TP {tp_text}"
+            + (f" | ~{m15_rr}R" if m15_rr is not None else "")
+            + " (better entry, more R)"
         )
+    else:
+        lines.append(
+            f"M15: entry {entry} | SL {sl} | TP {tp_text}"
+            + (f" | ~{m15_rr}R" if m15_rr is not None else "")
+        )
+        if m5_sl is not None:
+            lines.append(
+                f"M5:  entry {entry} | tighter SL {_fmt_num(m5_sl)}"
+                + (f" | ~{m5_rr}R to same TP" if m5_rr is not None else "")
+                + " (more R, smaller stop)"
+            )
     if trail:
         partial = trail.get("partial_1_5R")
         milestone = trail.get("milestone_3R")
