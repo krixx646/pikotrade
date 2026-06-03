@@ -15,7 +15,9 @@ Config (environment variables, all optional):
   PICOTRADE_WA_TO       default 249812612050953@lid
   PICOTRADE_PID_FILE    default ~/.picoclaw/.picoclaw.pid  (gateway auth token)
   PICOTRADE_SEND_TOKEN  explicit bearer token (overrides pid file)
-  PICOTRADE_MIN_TIER    default 3  (announce new setups only for tier <= this)
+  PICOTRADE_MIN_TIER    default 5  (announce new setups only for tier <= this;
+                        tiers: 1 HTF-MOMENTUM, 2 HTF-ZONE, 3 PREMIUM/MOMENTUM,
+                        4 HIGH/M15, 5 MEDIUM/DYNAMIC, 6 LOW, 7 WATCH)
   PICOTRADE_MAX_SENDS   default 8  (per run; extra events deferred to next run)
   PICOTRADE_OPEN_TRADES_MD  default ~/.picoclaw/workspace/memory/OPEN_TRADES.md
                             (concise live snapshot the PicoClaw bot reads to answer
@@ -39,17 +41,24 @@ DEFAULT_OPEN_TRADES_MD = "~/.picoclaw/workspace/memory/OPEN_TRADES.md"
 
 
 def _tier(route: str) -> tuple[int, str]:
-    """Mirror of forward_testing._route_tier so alerts carry the same priority."""
+    """Mirror of forward_testing._route_tier so alerts carry the same priority.
+
+    Each HTF day-trade strategy is its own tier (1, 2); the legacy routes follow.
+    """
     r = str(route or "").upper()
+    if r.startswith("HTF_MOMENTUM"):  # includes the HTF_MOMENTUM_M5 entry variant
+        return (1, "HTF-MOMENTUM")
+    if r.startswith("HTF_ZONE"):
+        return (2, "HTF-ZONE")
     if r.startswith("MOMENTUM"):
-        return (1, "PREMIUM")
+        return (3, "PREMIUM")
     if r.startswith("M15"):
-        return (2, "HIGH")
+        return (4, "HIGH")
     if r.startswith("DYNAMIC"):
-        return (3, "MEDIUM")
+        return (5, "MEDIUM")
     if r.startswith("REGIME") or r.startswith("RULE"):
-        return (4, "LOW")
-    return (5, "WATCH")
+        return (6, "LOW")
+    return (7, "WATCH")
 
 
 def _load_json(path: Path) -> dict:
@@ -283,7 +292,7 @@ def _write_open_trades_md(tests: dict) -> None:
 
 
 def main() -> int:
-    min_tier = int(os.environ.get("PICOTRADE_MIN_TIER", "3") or "3")
+    min_tier = int(os.environ.get("PICOTRADE_MIN_TIER", "5") or "5")
     max_sends = int(os.environ.get("PICOTRADE_MAX_SENDS", "8") or "8")
 
     tests = _load_json(FORWARD_TESTS_PATH)

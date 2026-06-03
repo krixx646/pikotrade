@@ -87,11 +87,13 @@ HTF_ZONE_PARAMS = HtfZoneParams() if HTF_ZONE_AVAILABLE else None
 # Lower rank = higher priority. Used to tier and sort live alerts for OpenClaw + the trader.
 # (rank, label, one-line rationale shown in the alert legend)
 TIER_ORDER: tuple[tuple[int, str, str], ...] = (
-    (1, "PREMIUM", "HTF_MOMENTUM (H1 day-trade, 76% win / +0.64R net backtest) + MOMENTUM impulse-continuation - best edge. Trade these first."),
-    (2, "HIGH", "HTF_ZONE (H4/H1 SMC reaction, 83% win / +1.25R but rare) + M15_SIMPLE on trendy pairs."),
-    (3, "MEDIUM", "DYNAMIC_SCORE - real gross edge, spread-sensitive. Best on a raw-spread account."),
-    (4, "LOW", "REGIME_RANGE / relaxed Rule - thin or net-negative blended. Confirmation only."),
-    (5, "WATCH", "AI routes (DeepSeek/Gemma) and opportunity variants - observe, do not trade blindly."),
+    (1, "HTF-MOMENTUM", "HTF_MOMENTUM - H1 day-trade momentum -> M15 entry, ride to H1 target (64% win / +0.73R / +140R backtest)."),
+    (2, "HTF-ZONE", "HTF_ZONE - H4/H1 SMC reaction -> M15 entry, trailing (83% win / +1.25R per trade, but rare)."),
+    (3, "PREMIUM", "MOMENTUM - M15 impulse-continuation, best M15 edge."),
+    (4, "HIGH", "M15_SIMPLE - net-positive on trendy pairs (BTC, USD_JPY, EUR_JPY)."),
+    (5, "MEDIUM", "DYNAMIC_SCORE - real gross edge, spread-sensitive. Best on a raw-spread account."),
+    (6, "LOW", "REGIME_RANGE / relaxed Rule - thin or net-negative blended. Confirmation only."),
+    (7, "WATCH", "AI routes (DeepSeek/Gemma) and opportunity variants - observe, do not trade blindly."),
 )
 TIER_LABELS = {rank: label for rank, label, _desc in TIER_ORDER}
 AI_CONSENSUS_MAX_AGE_MINUTES = 240
@@ -470,16 +472,20 @@ def _route_summary_lines(tests: list[dict[str, object]]) -> list[str]:
 def _route_tier(route: str) -> tuple[int, str]:
     """Map a route name (incl. variants like *_OPPORTUNITY) to its alert tier (rank, label)."""
     r = str(route or "").upper()
-    if r.startswith("HTF_MOMENTUM") or r.startswith("MOMENTUM"):
-        return (1, "PREMIUM")
-    if r.startswith("HTF_ZONE") or r.startswith("M15"):
-        return (2, "HIGH")
+    if r.startswith("HTF_MOMENTUM"):  # includes the HTF_MOMENTUM_M5 entry variant
+        return (1, "HTF-MOMENTUM")
+    if r.startswith("HTF_ZONE"):
+        return (2, "HTF-ZONE")
+    if r.startswith("MOMENTUM"):
+        return (3, "PREMIUM")
+    if r.startswith("M15"):
+        return (4, "HIGH")
     if r.startswith("DYNAMIC"):
-        return (3, "MEDIUM")
+        return (5, "MEDIUM")
     if r.startswith("REGIME") or r.startswith("RULE") or r == "RULE":
-        return (4, "LOW")
+        return (6, "LOW")
     # AI routes (DeepSeek/Gemma), consensus overrides, split-opportunity variants, anything else.
-    return (5, "WATCH")
+    return (7, "WATCH")
 
 
 def _tier_legend_lines() -> list[str]:
