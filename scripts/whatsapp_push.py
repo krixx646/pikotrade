@@ -88,11 +88,24 @@ def _resolve_token() -> str:
     return str(data.get("token", "")).strip()
 
 
-def _send(text: str) -> bool:
+def _recipients() -> list[str]:
+    """Recipient list. The FIRST entry is the primary (owner) and gates dedup; any
+    additional entries are best-effort read-only signal guests. Override with the
+    PICOTRADE_WA_TO env var (comma-separated) if needed."""
+    env = os.environ.get("PICOTRADE_WA_TO", "").strip()
+    if env:
+        return [r.strip() for r in env.split(",") if r.strip()]
+    return [
+        DEFAULT_TO,                      # owner (admin) - primary, gates dedup
+        "2348146310043@s.whatsapp.net",  # guest: read-only signal recipient (no command access)
+    ]
+
+
+def _send_one(text: str, to: str) -> bool:
     url = os.environ.get("PICOTRADE_SEND_URL", DEFAULT_SEND_URL)
     payload = {
         "channel": os.environ.get("PICOTRADE_WA_CHANNEL", DEFAULT_CHANNEL),
-        "to": os.environ.get("PICOTRADE_WA_TO", DEFAULT_TO),
+        "to": to,
         "text": text,
     }
     body = json.dumps(payload).encode("utf-8")
@@ -106,11 +119,27 @@ def _send(text: str) -> bool:
             response.read()
             return 200 <= response.status < 300
     except error.HTTPError as exc:
-        print(f"whatsapp_push: send failed HTTP {exc.code}: {exc.read()[:200]!r}")
+        print(f"whatsapp_push: send to {to} failed HTTP {exc.code}: {exc.read()[:200]!r}")
         return False
     except (error.URLError, OSError) as exc:
-        print(f"whatsapp_push: send failed: {exc}")
+        print(f"whatsapp_push: send to {to} failed: {exc}")
         return False
+
+
+def _send(text: str) -> bool:
+    """Deliver to all recipients. Only the primary (owner) gates the return value /
+    dedup state, so a failing guest recipient can never cause duplicate owner alerts."""
+    recipients = _recipients()
+    if not recipients:
+        return False
+    primary_ok = False
+    for idx, to in enumerate(recipients):
+        ok = _send_one(text, to)
+        if idx == 0:
+            primary_ok = ok
+        elif not ok:
+            print(f"whatsapp_push: guest recipient {to} did not receive (best-effort)")
+    return primary_ok
 
 
 def _fmt_num(value: object) -> str:

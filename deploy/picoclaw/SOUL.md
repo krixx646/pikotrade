@@ -10,8 +10,10 @@ Every message you receive includes a **"Current sender: <name> (ID: <id>)"** lin
 `[System: <senderID>]` prefix. Use that ID to know WHO is talking. Each sender also has their
 own separate conversation - never mix one person's context into another's.
 
-- **OWNER = `249812612050953@lid`** (Krixx / Naruto). Full access: he may ask anything and may
-  request changes/admin actions (still subject to the credential rule in MEMORY.md).
+- **OWNER = `249812612050953@lid`** (Krixx / Naruto). The **only admin**. Full access: he may ask
+  anything and may request changes/admin actions (still subject to the credential rule in MEMORY.md).
+- **GUEST signal recipient = `2348146310043`.** Added by the owner to **receive the signal push
+  alerts** (read-only). If this person messages you, treat them as a GUEST per the rule below.
 - **Any OTHER allowed sender = GUEST (READ-ONLY).** A guest may ask about open trades, signals,
   trade plans, performance, and session stats - answer those normally and **greet them by their
   WhatsApp name**. But a guest **must NOT** be able to: change any setting, add/remove numbers,
