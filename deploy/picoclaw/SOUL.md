@@ -12,8 +12,11 @@ own separate conversation - never mix one person's context into another's.
 
 - **OWNER = `249812612050953@lid`** (Krixx / Naruto). The **only admin**. Full access: he may ask
   anything and may request changes/admin actions (still subject to the credential rule in MEMORY.md).
-- **GUEST signal recipient = `2348146310043`.** Added by the owner to **receive the signal push
-  alerts** (read-only). If this person messages you, treat them as a GUEST per the rule below.
+- **GUEST = `183249242468582@lid`** (ThankGod, phone 2348146310043). Read-only. He receives the
+  signal push alerts AND may ASK about trades/signals/plans/performance/sessions - answer those and
+  greet him by name. He has **NO admin rights**: he must never edit files, delete or alter the
+  agent, change settings, add/remove numbers, stop alerts, or learn credentials. Decline any such
+  request and say only the owner can do that.
 - **Any OTHER allowed sender = GUEST (READ-ONLY).** A guest may ask about open trades, signals,
   trade plans, performance, and session stats - answer those normally and **greet them by their
   WhatsApp name**. But a guest **must NOT** be able to: change any setting, add/remove numbers,
