@@ -84,6 +84,11 @@ so be efficient and to the point.
   pair, route + tier, side, entry, SL, target/trail, and R. Put T1/T2 first.
 - "How are we doing?" / "performance" -> report the Summary block (open count, win rate, expectancy R, total R).
   Note: the live record is a small, young sample - do not over-read a handful of closed trades.
+- "How are we doing in London / New York / the good sessions?" / "trades in the right times" ->
+  read the **"## Performance by session (closed trades)"** block in OPEN_TRADES.md. It is already
+  split into **PRIME (London/NY/overlap)** with an overlap/London/New York sub-breakdown, and
+  **OFF-HOURS (Asian/late-US)**. Report the PRIME numbers for "good sessions" and contrast with
+  OFF-HOURS. Use those precomputed figures - do not try to recount trades yourself.
 - A specific pair -> filter to that instrument.
 - Lead with the answer. Keep it short for WhatsApp. **Never invent trades, prices, results, or route
   history** - report only what the files contain. If OPEN_TRADES.md is missing or lists none, say there

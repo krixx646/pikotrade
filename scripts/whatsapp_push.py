@@ -228,6 +228,45 @@ def _decision_lines(test: dict, rank: int) -> list[str]:
     return lines
 
 
+PRIME_SESSIONS = ("London/New York overlap", "London", "New York")
+
+
+def _session_breakdown(closed: list[dict]) -> list[str]:
+    """Segment closed trades by FX session so performance in prime hours
+    (London / New York / overlap) is reported separately from off-hours (Asian/late-US)."""
+    groups: dict[str, list[float]] = {}
+    for test in closed:
+        realized = _float_or_none(test.get("realized_r"))
+        if realized is None:
+            continue
+        name, _ok = _session_quality(test)
+        groups.setdefault(name, []).append(realized)
+
+    def _stat(values: list[float]) -> str:
+        n = len(values)
+        if n == 0:
+            return "0 trades"
+        wins = sum(1 for v in values if v > 0)
+        total = sum(values)
+        return f"{n} trades | win {100 * wins / n:.0f}% | exp {total / n:+.2f}R | total {total:+.2f}R"
+
+    prime = [v for name in PRIME_SESSIONS for v in groups.get(name, [])]
+    off_hours = groups.get("off-hours (Asian/late-US)", [])
+    unknown = groups.get("unknown", [])
+
+    lines = [
+        "## Performance by session (closed trades)",
+        f"- PRIME (London/NY/overlap): {_stat(prime)}",
+        f"  - overlap: {_stat(groups.get('London/New York overlap', []))}",
+        f"  - London: {_stat(groups.get('London', []))}",
+        f"  - New York: {_stat(groups.get('New York', []))}",
+        f"- OFF-HOURS (Asian/late-US): {_stat(off_hours)}",
+    ]
+    if unknown:
+        lines.append(f"- (untimed): {_stat(unknown)}")
+    return lines
+
+
 def _plan_block(test: dict) -> list[str]:
     """The full dual-timeframe trade plan, mirroring the OpenClaw forward-test report:
     entry zone, M15 plan, tighter M5 plan, and the trailing-TP milestones."""
@@ -311,10 +350,11 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
 def _partial_message(test: dict, tier_label: str, rank: int) -> str:
     marker = _route_emoji(rank)
     prefix = f"{marker} " if marker else ""
-    return (
+    head = (
         f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - banked ~50% at 1.5R, SL -> breakeven, runner trailing"
     )
+    return "\n".join([head, *_decision_lines(test, rank)])
 
 
 def _closed_message(test: dict, tier_label: str, rank: int) -> str:
@@ -323,10 +363,12 @@ def _closed_message(test: dict, tier_label: str, rank: int) -> str:
     realized = _float_or_none(test.get("realized_r"))
     realized_text = f"{realized:+.2f}R" if realized is not None else "n/a"
     tag = "WIN" if (realized is not None and realized > 0) else "LOSS"
-    return (
+    head = (
         f"{prefix}[{tag}][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - closed {test.get('outcome', '')}, realized {realized_text}"
     )
+    # Show the session the trade was taken in so wins/losses can be traced to good vs bad times.
+    return "\n".join([head, *_decision_lines(test, rank)])
 
 
 def _write_open_trades_md(tests: dict) -> None:
@@ -367,6 +409,7 @@ def _write_open_trades_md(tests: dict) -> None:
         )
     else:
         lines.append("- Closed (all-time): 0")
+    lines += ["", *_session_breakdown(closed)]
     lines += ["", "## Open trades (priority order)", ""]
     if not open_tests:
         lines.append("None right now.")
@@ -396,9 +439,11 @@ def _write_open_trades_md(tests: dict) -> None:
     for test in recent:
         realized_r = _float_or_none(test.get("realized_r"))
         realized_text = f"{realized_r:+.2f}R" if realized_r is not None else "n/a"
+        session_name, session_ok = _session_quality(test)
+        session_tag = session_name if session_ok else f"{session_name} [off-hours]"
         lines.append(
             f"- {test.get('instrument', '')} {test.get('route', '')} {test.get('side', '')} - "
-            f"{test.get('outcome', '')} {realized_text}"
+            f"{test.get('outcome', '')} {realized_text} | {session_tag}"
         )
 
     try:
