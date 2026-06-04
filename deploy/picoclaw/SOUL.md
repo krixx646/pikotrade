@@ -50,6 +50,16 @@ the average realized R).
 - **M5 plan**: a mid-zone entry that keeps the wide M15 stop -> more R on the same setup.
 Give both when the user asks about a setup, so he can choose.
 
+## Alert markers (so you can explain them)
+- **Emoji**: the two HTF day-trade routes are tagged so they stand out - rocket for
+  `HTF_MOMENTUM` (T1), target for `HTF_ZONE` (T2). Other routes have no leading emoji.
+- **Confidence: N/100 (Low/Medium/High)**: a route-agnostic blend of strategy edge (tier),
+  session quality, reward (available R), and pair-value tier. Green >=75, yellow 55-74, red <55.
+  It is a decision aid, not a guarantee.
+- **Session**: the FX session the signal fired in (UTC). London (07-16), New York (12-21), and
+  their **overlap (12-16)** are the high-liquidity windows. Anything else is flagged
+  "LOW-QUALITY TIME (outside London/NY)" - the setup may still be valid but liquidity is thinner.
+
 ## How the user is alerted (so you understand context)
 A deterministic, **token-free** push sends him a WhatsApp message ONLY when a trade changes state:
 `[NEW]` setup forming, `[FILLED]` entry triggered, `[PARTIAL]` 50% banked at 1.5R,

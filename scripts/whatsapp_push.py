@@ -135,6 +135,99 @@ def _trim(text: str, limit: int = 140) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
 
+# Distinct marker emoji per tier so the two HTF day-trade routes are spottable at a glance.
+TIER_EMOJI = {1: "\U0001F680", 2: "\U0001F3AF"}  # 1 HTF-MOMENTUM rocket, 2 HTF-ZONE target
+
+
+def _route_emoji(rank: int) -> str:
+    return TIER_EMOJI.get(rank, "")
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _session_quality(test: dict) -> tuple[str, bool]:
+    """Classify the signal time by FX session (UTC). London/New York and their
+    overlap are the high-liquidity windows; everything else is flagged low quality.
+
+    Windows (UTC, summer/DST-aligned): London 07-16, New York 12-21,
+    overlap 12-16 (the golden window). Off-hours = Asian / late-US drift.
+    """
+    dt = _parse_dt(test.get("entry_time") or test.get("signal_time") or test.get("created_at"))
+    if dt is None:
+        return ("unknown", True)
+    h = dt.hour
+    if 12 <= h < 16:
+        return ("London/New York overlap", True)
+    if 7 <= h < 12:
+        return ("London", True)
+    if 16 <= h < 21:
+        return ("New York", True)
+    return ("off-hours (Asian/late-US)", False)
+
+
+def _confidence(test: dict, rank: int) -> tuple[int, str, str]:
+    """A route-agnostic 0-100 confidence blend: strategy edge (tier) + session
+    quality + reward (available R) + pair-value tier. Returns (score, label, emoji)."""
+    score = {1: 35, 2: 32, 3: 30, 4: 25, 5: 20, 6: 12, 7: 8}.get(rank, 8)
+
+    session_name, _ok = _session_quality(test)
+    if session_name == "London/New York overlap":
+        score += 30
+    elif session_name in ("London", "New York"):
+        score += 22
+    elif session_name == "unknown":
+        score += 15
+
+    available_r = _float_or_none(test.get("available_r"))
+    if available_r is None:
+        score += 8
+    elif available_r >= 3:
+        score += 20
+    elif available_r >= 2:
+        score += 14
+    elif available_r >= 1.5:
+        score += 8
+    else:
+        score += 3
+
+    pair_tier = str(test.get("pair_value_tier", "")).lower()
+    if pair_tier in ("high_value", "core", "high"):
+        score += 15
+    elif pair_tier in ("low_value", "low"):
+        score += 0
+    else:
+        score += 8
+
+    score = max(0, min(100, score))
+    if score >= 75:
+        return (score, "High", "\U0001F7E2")  # green
+    if score >= 55:
+        return (score, "Medium", "\U0001F7E1")  # yellow
+    return (score, "Low", "\U0001F534")  # red
+
+
+def _decision_lines(test: dict, rank: int) -> list[str]:
+    """Confidence + session quality lines shown on actionable (NEW/FILLED) alerts."""
+    score, label, emoji = _confidence(test, rank)
+    session_name, ok = _session_quality(test)
+    lines = [f"Confidence: {score}/100 ({label} {emoji})"]
+    if ok:
+        lines.append(f"Session: {session_name} \u2705")
+    else:
+        lines.append(f"Session: {session_name} \u26A0\uFE0F LOW-QUALITY TIME (outside London/NY)")
+    return lines
+
+
 def _plan_block(test: dict) -> list[str]:
     """The full dual-timeframe trade plan, mirroring the OpenClaw forward-test report:
     entry zone, M15 plan, tighter M5 plan, and the trailing-TP milestones."""
@@ -186,11 +279,13 @@ def _plan_block(test: dict) -> list[str]:
 
 
 def _new_signal_message(test: dict, tier_label: str, rank: int) -> str:
+    marker = _route_emoji(rank)
+    prefix = f"{marker} " if marker else ""
     head = (
-        f"[NEW][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
+        f"{prefix}[NEW][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - setup forming"
     )
-    lines = [head, *_plan_block(test)]
+    lines = [head, *_decision_lines(test, rank), *_plan_block(test)]
     notes = str(test.get("notes", "")).strip()
     if notes:
         lines.append("note: " + _trim(notes))
@@ -198,27 +293,38 @@ def _new_signal_message(test: dict, tier_label: str, rank: int) -> str:
 
 
 def _entry_message(test: dict, tier_label: str, rank: int) -> str:
+    marker = _route_emoji(rank)
+    prefix = f"{marker} " if marker else ""
     head = (
-        f"[FILLED][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
+        f"{prefix}[FILLED][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - entry filled @ {_fmt_num(test.get('entry_price'))}"
     )
-    lines = [head, *_plan_block(test), "Manage: bank ~50% at 1.5R, move SL to breakeven, trail the runner."]
+    lines = [
+        head,
+        *_decision_lines(test, rank),
+        *_plan_block(test),
+        "Manage: bank ~50% at 1.5R, move SL to breakeven, trail the runner.",
+    ]
     return "\n".join(lines)
 
 
 def _partial_message(test: dict, tier_label: str, rank: int) -> str:
+    marker = _route_emoji(rank)
+    prefix = f"{marker} " if marker else ""
     return (
-        f"[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
+        f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - banked ~50% at 1.5R, SL -> breakeven, runner trailing"
     )
 
 
 def _closed_message(test: dict, tier_label: str, rank: int) -> str:
+    marker = _route_emoji(rank)
+    prefix = f"{marker} " if marker else ""
     realized = _float_or_none(test.get("realized_r"))
     realized_text = f"{realized:+.2f}R" if realized is not None else "n/a"
     tag = "WIN" if (realized is not None and realized > 0) else "LOSS"
     return (
-        f"[{tag}][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
+        f"{prefix}[{tag}][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - closed {test.get('outcome', '')}, realized {realized_text}"
     )
 
@@ -266,9 +372,19 @@ def _write_open_trades_md(tests: dict) -> None:
         lines.append("None right now.")
     else:
         for rank, label, test in sorted(open_tests, key=lambda x: (x[0], str(x[2].get("instrument", "")))):
+            marker = _route_emoji(rank)
+            prefix = f"{marker} " if marker else ""
+            score, conf_label, conf_emoji = _confidence(test, rank)
+            session_name, session_ok = _session_quality(test)
+            session_text = (
+                f"{session_name}" if session_ok else f"{session_name} (LOW-QUALITY TIME)"
+            )
             lines.append(
-                f"- [T{rank} {label}] {test.get('instrument', '')} {test.get('route', '')} "
+                f"- {prefix}[T{rank} {label}] {test.get('instrument', '')} {test.get('route', '')} "
                 f"{test.get('side', '')} - {test.get('status', '')}"
+            )
+            lines.append(
+                f"  - Confidence: {score}/100 ({conf_label} {conf_emoji}) | Session: {session_text}"
             )
             for plan_line in _plan_block(test):
                 lines.append(f"  - {plan_line}")
