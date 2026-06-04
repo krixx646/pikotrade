@@ -102,8 +102,8 @@ AI_CONSENSUS_ZONE_TOLERANCE_PIPS = 3.0
 AI_HIGH_VALUE_MIN_CONFIDENCE = 70.0
 AI_HIGH_VALUE_MAX_DISTANCE_RANGES = 3.0
 # Route enable flags. M15_SIMPLE and REGIME_RANGE stayed net-negative across OOS windows even
-# with the better 3R exit (M15_SIMPLE ~-0.12R, REGIME_RANGE ~-0.07R per trade), so they are
-# disabled. DYNAMIC_SCORE flips net-positive with the 3R exit, so it stays on.
+# with the better 2R/3R exit (M15_SIMPLE ~-0.12R, REGIME_RANGE ~-0.07R per trade), so they are
+# disabled. DYNAMIC_SCORE flips net-positive with the improved exit, so it stays on.
 M15_SIMPLE_ENABLED = False
 DYNAMIC_SCORE_ENABLED = True
 REGIME_RANGE_ENABLED = False
@@ -116,12 +116,12 @@ REGIME_RANGE_MAX_DISTANCE_RANGES = 1.5
 REGIME_RANGE_OVERLAP_PENALTY = 0.4
 SCORE_DUPLICATE_ROUTES = {"DYNAMIC_SCORE", "REGIME_RANGE"}
 # Exit model: bank PARTIAL_FRACTION of the position at PARTIAL_TARGET_R, move the stop to
-# breakeven, then trail the runner RUNNER_TRAIL_R behind the peak. The partial sits at 3R (not
-# 1.5R) because OOS backtests (2024 H1/H2 + 2025 H1, MOMENTUM/DYNAMIC_SCORE) showed banking at
-# 1.5R caps realized R and turns a positive gross edge net-negative; pushing the partial to 3R
-# was equal-or-better in every route and window (e.g. MOMENTUM net -54R -> +82R in-sample,
-# DYNAMIC_SCORE flips net-positive). Win rate drops (~45% -> ~30%) but expectancy/total R rise.
-PARTIAL_TARGET_R = 3.0
+# breakeven, then trail the runner RUNNER_TRAIL_R behind the peak. The partial sits at 2R: OOS
+# backtests (2024 H2 + 2025 H1, MOMENTUM) showed 2R is the sweet spot - it matches/beats 3R on
+# total R (2025 H1: +66R vs +38R), keeps a more bearable ~40% win rate (vs ~30% at 3R), and the
+# average winner is +2.14R (a real 2R+ win). Locking at 1.5R was net-negative (caps realized R);
+# both the partial AND the move-to-breakeven trigger at this level.
+PARTIAL_TARGET_R = 2.0
 PARTIAL_FRACTION = 0.5
 RUNNER_TRAIL_R = 1.0
 FROZEN_AI_SPLIT_ROUTES: set[tuple[str, str]] = set()
@@ -384,7 +384,7 @@ def _summary_lines(tests: dict[str, object]) -> list[str]:
     deduped_new = list(_unique_tests(new_values).values())
 
     lines = [
-        "- Exit model: bank 50% at 3R, runner trails 1R behind peak (uncapped), breakeven after the partial.",
+        "- Exit model: bank 50% at 2R, runner trails 1R behind peak (uncapped), breakeven after the partial.",
         "- Metric: realized R per closed trade. Win = realized R above 0; expectancy = average realized R.",
     ]
     lines.extend(_realized_summary_block("All new-model (deduped)", deduped_new))
@@ -580,7 +580,7 @@ def _partial_trail_line(test: dict[str, object]) -> str:
         f"SL {test.get('stop_loss', '')}",
     ]
     if test.get("partial_taken"):
-        parts.append("partial@3R booked")
+        parts.append("partial@2R booked")
     else:
         parts.append("partial pending")
     realized = _float_or_none(test.get("realized_r"))
@@ -984,7 +984,7 @@ def _htf_zone_candidates(client: OandaClient, signal_time: str) -> list[SignalCa
                 bos_time=signal_time,
                 notes=(
                     f"HTF_ZONE: {sig.side} SMC day-trade. {sig.note}. Enter the M15 reaction at the H1 zone, "
-                    f"zone-edge stop, bank ~50% at 3R then trail. Pair value: {pair_value.label}."
+                    f"zone-edge stop, bank ~50% at 2R then trail. Pair value: {pair_value.label}."
                 ),
                 target_price=None,
                 target_timeframe="fixed",
@@ -1663,7 +1663,7 @@ def _new_test(
     return {
         "model": "partial_trail",
         # Profile A routes ride 100% to the fixed HTF target (no partial/trail); everything else
-        # uses the standard bank-at-3R-then-trail model.
+        # uses the standard bank-at-2R-then-trail model.
         "exit_model": "ride_target" if candidate.route == "HTF_MOMENTUM" else "partial_trail",
         "route": candidate.route,
         "instrument": candidate.instrument,
@@ -1767,7 +1767,7 @@ def _m5_sibling_test(base: dict[str, object]) -> dict[str, object] | None:
             "trail_levels": {
                 "partial_1_5R": round(partial_target, 5),
                 "milestone_3R": round(_target_price(entry_mid, m15_stop, side, 3.0), 5),
-                "note": "M5 variant: deeper mid-zone entry, wide M15 structural stop (room). Bank ~50% at 3R, BE after, trail 1R behind peak.",
+                "note": "M5 variant: deeper mid-zone entry, wide M15 structural stop (room). Bank ~50% at 2R, BE after, trail 1R behind peak.",
             },
             "partial_taken": False,
             "partial_time": "",

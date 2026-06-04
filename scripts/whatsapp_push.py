@@ -341,7 +341,7 @@ def _plan_block(test: dict) -> list[str]:
             )
     if trail:
         partial = trail.get("partial_price", trail.get("partial_1_5R"))
-        partial_r = trail.get("partial_r", 3.0)
+        partial_r = trail.get("partial_r", 2.0)
         lines.append(
             f"Trail: bank ~50% @ {_fmt_num(partial)} ({partial_r:g}R), "
             "then trail 1R behind peak (uncapped)"
@@ -375,7 +375,7 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
         head,
         *_decision_lines(test, rank),
         *_plan_block(test),
-        "Manage: bank ~50% at 3R, move SL to breakeven, trail the runner.",
+        "Manage: bank ~50% at 2R, move SL to breakeven, trail the runner.",
     ]
     return "\n".join(lines)
 
@@ -384,7 +384,7 @@ def _partial_message(test: dict, tier_label: str, rank: int) -> str:
     prefix = _head_prefix(test, rank)
     head = (
         f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
-        f"{test.get('side', '')} - banked ~50% at 3R, SL -> breakeven, runner trailing"
+        f"{test.get('side', '')} - banked ~50% at 2R, SL -> breakeven, runner trailing"
     )
     return "\n".join([head, *_decision_lines(test, rank)])
 

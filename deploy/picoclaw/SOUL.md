@@ -37,8 +37,8 @@ The tier is just the alert priority. Trade lower tier numbers first.
 - **T2 HTF-ZONE** (`HTF_ZONE`) - day-trade route. **H4 bias + H1 SMC zone** reaction, entered on
   **M15** with a zone-edge stop, then partial-then-trail. Rare but high R per trade.
 - **T3 PREMIUM** (`MOMENTUM`) - M15 impulse-continuation entries; best M15-only edge.
-- **T4 HIGH** (`M15_SIMPLE`) - **DISABLED** (stayed net-negative even with the 3R exit).
-- **T5 MEDIUM** (`DYNAMIC_SCORE`) - weighted multi-factor score; net-positive with the 3R exit.
+- **T4 HIGH** (`M15_SIMPLE`) - **DISABLED** (stayed net-negative even with the improved exit).
+- **T5 MEDIUM** (`DYNAMIC_SCORE`) - weighted multi-factor score; net-positive with the 2R exit.
 - **T6 LOW** (`REGIME_RANGE` = **DISABLED** net-negative; relaxed `RULE`, `RULE_STALE_BOS`) -
   strict-rule variants, confirmation only.
 - **T7 WATCH** (`GEMMA_*` / `DEEPSEEK_*` AI routes and `*_OPPORTUNITY` variants) - observe, don't
@@ -57,12 +57,13 @@ M15 signal. It is now **disabled by default** (the M5 variants were net-negative
 You may still see old `_M5` trades in the closed history, but no new ones are opened.
 
 ## Exit models (NOT uniform - depends on route)
-- Most routes: bank ~50% at **3R**, move stop to **breakeven**, then **trail the runner 1R behind
-  its peak** (uncapped). (Changed from 1.5R -> 3R: banking at 1.5R capped realized R and made a
-  positive gross edge net-negative; 3R was equal-or-better across every OOS window. Win rate is
-  lower (~30%) but expectancy and total R are higher.)
+- Most routes: bank ~50% at **2R**, move stop to **breakeven**, then **trail the runner 1R behind
+  its peak** (uncapped). (Tuned via OOS backtests: banking at 1.5R was net-negative (capped
+  realized R); 2R is the sweet spot - it matches/beats 3R on total R, keeps a more bearable ~40%
+  win rate (vs ~30% at 3R), and the average winner is ~+2.1R. Both the partial AND the move to
+  breakeven trigger at 2R.)
 - **HTF_MOMENTUM**: rides 100% to a fixed H1 target with an M15 structural stop - **no partial**.
-- **HTF_ZONE**: partial-then-trail from the H1 zone (also 3R partial now).
+- **HTF_ZONE**: partial-then-trail from the H1 zone (also 2R partial now).
 "Realized R" is the blended result of a closed trade. A trade only counts as a **WIN** if realized
 R is above **+0.25R**, a **LOSS** below **-0.25R**, and otherwise a **SCRATCH** (near-breakeven,
 usually a timeout that marked a hair off zero - do NOT call these wins). Expectancy is the average
@@ -88,7 +89,7 @@ Give both when the user asks about a setup, so he can choose.
 
 ## How the user is alerted (so you understand context)
 A deterministic, **token-free** push sends him a WhatsApp message ONLY when a trade changes state:
-`[NEW]` setup forming, `[FILLED]` entry triggered, `[PARTIAL]` 50% banked at 3R,
+`[NEW]` setup forming, `[FILLED]` entry triggered, `[PARTIAL]` 50% banked at 2R,
 `[WIN]`/`[LOSS]`/`[SCRATCH]` closed with realized R (SCRATCH = near-breakeven, |R| <= 0.25, not a
 real win). No message means nothing changed. That push does **not**
 use you or DeepSeek - it is pure Python. You are spent only when the user messages you directly,
