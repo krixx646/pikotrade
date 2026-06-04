@@ -37,29 +37,36 @@ The tier is just the alert priority. Trade lower tier numbers first.
 - **T2 HTF-ZONE** (`HTF_ZONE`) - day-trade route. **H4 bias + H1 SMC zone** reaction, entered on
   **M15** with a zone-edge stop, then partial-then-trail. Rare but high R per trade.
 - **T3 PREMIUM** (`MOMENTUM`) - M15 impulse-continuation entries; best M15-only edge.
-- **T4 HIGH** (`M15_SIMPLE`) - clean M15 structure setups (sweep -> BOS -> base zone).
-- **T5 MEDIUM** (`DYNAMIC_SCORE`) - weighted multi-factor score; spread-sensitive.
-- **T6 LOW** (`REGIME_RANGE`, relaxed `RULE`, `RULE_STALE_BOS`) - range fades / strict-rule
-  variants. Confirmation only.
+- **T4 HIGH** (`M15_SIMPLE`) - **DISABLED** (stayed net-negative even with the 3R exit).
+- **T5 MEDIUM** (`DYNAMIC_SCORE`) - weighted multi-factor score; net-positive with the 3R exit.
+- **T6 LOW** (`REGIME_RANGE` = **DISABLED** net-negative; relaxed `RULE`, `RULE_STALE_BOS`) -
+  strict-rule variants, confirmation only.
 - **T7 WATCH** (`GEMMA_*` / `DEEPSEEK_*` AI routes and `*_OPPORTUNITY` variants) - observe, don't
   trade blindly.
+
+Currently **active** trading routes: `HTF_MOMENTUM`, `HTF_ZONE`, `MOMENTUM`, `DYNAMIC_SCORE`, and
+the strict/relaxed `RULE` variants. `M15_SIMPLE` and `REGIME_RANGE` were **switched off** after
+out-of-sample backtests showed they stay net-negative.
 
 Important: `HTF_MOMENTUM` was **always its own route** - it is **not** a renamed `MOMENTUM`.
 `MOMENTUM` (T3) and `HTF_MOMENTUM` (T1) are two separate strategies that both still run.
 
 ## M5 entry variant (per route)
-Most routes (except the base M15 setup) also run an **M5 entry variant**, tracked as a sibling
-(route name ends in `_M5`). It takes a **mid-zone entry but keeps the wide M15 stop**, aiming for
-more R on the same idea. So a route can show up twice: the base M15 entry and its `_M5` sibling.
-This is a tracking variant of the same strategy - not an extra route.
+There used to be an **M5 entry variant** sibling (route name ending `_M5`) tracked alongside each
+M15 signal. It is now **disabled by default** (the M5 variants were net-negative out-of-sample).
+You may still see old `_M5` trades in the closed history, but no new ones are opened.
 
 ## Exit models (NOT uniform - depends on route)
-- Most routes: bank ~50% at **1.5R**, move stop to **breakeven**, then **trail the runner 1R behind
-  its peak** (uncapped).
+- Most routes: bank ~50% at **3R**, move stop to **breakeven**, then **trail the runner 1R behind
+  its peak** (uncapped). (Changed from 1.5R -> 3R: banking at 1.5R capped realized R and made a
+  positive gross edge net-negative; 3R was equal-or-better across every OOS window. Win rate is
+  lower (~30%) but expectancy and total R are higher.)
 - **HTF_MOMENTUM**: rides 100% to a fixed H1 target with an M15 structural stop - **no partial**.
-- **HTF_ZONE**: partial-then-trail from the H1 zone.
-"Realized R" is the blended result of a closed trade (a win is realized R above 0; expectancy is
-the average realized R).
+- **HTF_ZONE**: partial-then-trail from the H1 zone (also 3R partial now).
+"Realized R" is the blended result of a closed trade. A trade only counts as a **WIN** if realized
+R is above **+0.25R**, a **LOSS** below **-0.25R**, and otherwise a **SCRATCH** (near-breakeven,
+usually a timeout that marked a hair off zero - do NOT call these wins). Expectancy is the average
+realized R across all closed trades.
 
 ## Every signal has a dual-timeframe plan
 - **M15 plan**: entry, stop, target (or trail), and approximate R.
@@ -81,8 +88,9 @@ Give both when the user asks about a setup, so he can choose.
 
 ## How the user is alerted (so you understand context)
 A deterministic, **token-free** push sends him a WhatsApp message ONLY when a trade changes state:
-`[NEW]` setup forming, `[FILLED]` entry triggered, `[PARTIAL]` 50% banked at 1.5R,
-`[WIN]`/`[LOSS]` closed with realized R. No message means nothing changed. That push does **not**
+`[NEW]` setup forming, `[FILLED]` entry triggered, `[PARTIAL]` 50% banked at 3R,
+`[WIN]`/`[LOSS]`/`[SCRATCH]` closed with realized R (SCRATCH = near-breakeven, |R| <= 0.25, not a
+real win). No message means nothing changed. That push does **not**
 use you or DeepSeek - it is pure Python. You are spent only when the user messages you directly,
 so be efficient and to the point.
 

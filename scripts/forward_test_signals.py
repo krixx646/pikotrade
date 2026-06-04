@@ -42,10 +42,15 @@ def parse_args() -> argparse.Namespace:
         help="Only open new tests from signals updated within this many minutes.",
     )
     parser.add_argument(
+        "--m5-variant",
+        action="store_true",
+        help="Opt in to the parallel {route}_M5 paper trade (deeper mid-zone entry, wide M15 stop). "
+        "Disabled by default: the M5 variants were net-negative across OOS backtests.",
+    )
+    parser.add_argument(
         "--no-m5-variant",
         action="store_true",
-        help="Disable the parallel {route}_M5 paper trade (same entry, tighter M5 stop) "
-        "that is tracked alongside each M15 signal for an M15-vs-M5 live comparison.",
+        help="Deprecated/no-op (M5 variants are off by default). Kept for backward compatibility.",
     )
     return parser.parse_args()
 
@@ -62,7 +67,7 @@ def main() -> int:
         rr_values=_rr_values(args.rr),
         timeout_bars=args.timeout_bars,
         max_signal_age_minutes=args.max_signal_age_minutes,
-        track_m5_variant=not args.no_m5_variant,
+        track_m5_variant=args.m5_variant and not args.no_m5_variant,
     )
     print(f"Forward tests tracked: {len(tests)}")
     print(f"JSON: {args.tests_output}")

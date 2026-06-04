@@ -101,6 +101,12 @@ AI_CONSENSUS_MAX_GAP_MINUTES = 240
 AI_CONSENSUS_ZONE_TOLERANCE_PIPS = 3.0
 AI_HIGH_VALUE_MIN_CONFIDENCE = 70.0
 AI_HIGH_VALUE_MAX_DISTANCE_RANGES = 3.0
+# Route enable flags. M15_SIMPLE and REGIME_RANGE stayed net-negative across OOS windows even
+# with the better 3R exit (M15_SIMPLE ~-0.12R, REGIME_RANGE ~-0.07R per trade), so they are
+# disabled. DYNAMIC_SCORE flips net-positive with the 3R exit, so it stays on.
+M15_SIMPLE_ENABLED = False
+DYNAMIC_SCORE_ENABLED = True
+REGIME_RANGE_ENABLED = False
 M15_SIMPLE_MAX_DISTANCE_RANGES = 4.0
 DYNAMIC_SCORE_MINIMUM = 5.8
 DYNAMIC_SCORE_MAX_DISTANCE_RANGES = 1.5
@@ -109,7 +115,13 @@ REGIME_RANGE_MINIMUM = 4.8
 REGIME_RANGE_MAX_DISTANCE_RANGES = 1.5
 REGIME_RANGE_OVERLAP_PENALTY = 0.4
 SCORE_DUPLICATE_ROUTES = {"DYNAMIC_SCORE", "REGIME_RANGE"}
-PARTIAL_TARGET_R = 1.5
+# Exit model: bank PARTIAL_FRACTION of the position at PARTIAL_TARGET_R, move the stop to
+# breakeven, then trail the runner RUNNER_TRAIL_R behind the peak. The partial sits at 3R (not
+# 1.5R) because OOS backtests (2024 H1/H2 + 2025 H1, MOMENTUM/DYNAMIC_SCORE) showed banking at
+# 1.5R caps realized R and turns a positive gross edge net-negative; pushing the partial to 3R
+# was equal-or-better in every route and window (e.g. MOMENTUM net -54R -> +82R in-sample,
+# DYNAMIC_SCORE flips net-positive). Win rate drops (~45% -> ~30%) but expectancy/total R rise.
+PARTIAL_TARGET_R = 3.0
 PARTIAL_FRACTION = 0.5
 RUNNER_TRAIL_R = 1.0
 FROZEN_AI_SPLIT_ROUTES: set[tuple[str, str]] = set()
@@ -168,16 +180,19 @@ def run_forward_testing(
     rr_values: tuple[float, ...] = (3.0,),
     timeout_bars: int = 48,
     max_signal_age_minutes: int = 30,
-    track_m5_variant: bool = True,
+    track_m5_variant: bool = False,
 ) -> dict[str, object]:
     tests = _load_json(tests_path)
     diagnostics: list[dict[str, object]] = []
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
     candidates = _load_signal_candidates()
-    candidates.extend(_m15_simple_candidates(client, now))
-    candidates.extend(_dynamic_score_candidates(client, now))
-    candidates.extend(_regime_range_candidates(client, now))
+    if M15_SIMPLE_ENABLED:
+        candidates.extend(_m15_simple_candidates(client, now))
+    if DYNAMIC_SCORE_ENABLED:
+        candidates.extend(_dynamic_score_candidates(client, now))
+    if REGIME_RANGE_ENABLED:
+        candidates.extend(_regime_range_candidates(client, now))
     candidates.extend(_momentum_candidates(client, now))
     candidates.extend(_htf_momentum_candidates(client, now))
     candidates.extend(_htf_zone_candidates(client, now))
@@ -369,7 +384,7 @@ def _summary_lines(tests: dict[str, object]) -> list[str]:
     deduped_new = list(_unique_tests(new_values).values())
 
     lines = [
-        "- Exit model: bank 50% at 1.5R, runner trails 1R behind peak (uncapped), breakeven after the partial.",
+        "- Exit model: bank 50% at 3R, runner trails 1R behind peak (uncapped), breakeven after the partial.",
         "- Metric: realized R per closed trade. Win = realized R above 0; expectancy = average realized R.",
     ]
     lines.extend(_realized_summary_block("All new-model (deduped)", deduped_new))
@@ -565,7 +580,7 @@ def _partial_trail_line(test: dict[str, object]) -> str:
         f"SL {test.get('stop_loss', '')}",
     ]
     if test.get("partial_taken"):
-        parts.append("partial@1.5R booked")
+        parts.append("partial@3R booked")
     else:
         parts.append("partial pending")
     realized = _float_or_none(test.get("realized_r"))
@@ -600,9 +615,11 @@ def _plan_sublines(test: dict[str, object]) -> list[str]:
         )
     trail = test.get("trail_levels")
     if isinstance(trail, dict):
+        partial_price = trail.get("partial_price", trail.get("partial_1_5R", ""))
+        partial_r = trail.get("partial_r", 3.0)
         lines.append(
-            f"  - Trailing TP: partial @ `{trail.get('partial_1_5R', '')}` (1.5R),"
-            f" 3R @ `{trail.get('milestone_3R', '')}`, then trail. {trail.get('note', '')}"
+            f"  - Trailing TP: bank ~50% @ `{partial_price}` ({partial_r:g}R),"
+            f" then trail. {trail.get('note', '')}"
         )
     return lines
 
@@ -967,7 +984,7 @@ def _htf_zone_candidates(client: OandaClient, signal_time: str) -> list[SignalCa
                 bos_time=signal_time,
                 notes=(
                     f"HTF_ZONE: {sig.side} SMC day-trade. {sig.note}. Enter the M15 reaction at the H1 zone, "
-                    f"zone-edge stop, bank ~50% at 1.5R then trail. Pair value: {pair_value.label}."
+                    f"zone-edge stop, bank ~50% at 3R then trail. Pair value: {pair_value.label}."
                 ),
                 target_price=None,
                 target_timeframe="fixed",
@@ -1634,16 +1651,19 @@ def _new_test(
             2,
         )
     m5_plan = _m5_plan(candidate.side, entry_price, stop_loss, target_price, m5_candles or [])
-    # Trailing-TP milestones: bank a partial, then trail the runner uncapped.
+    # Trailing-TP plan: bank a partial at the partial level, then trail the runner uncapped.
     trail_levels = {
-        "partial_1_5R": round(partial_target_price, 5),
-        "milestone_3R": round(_target_price(entry_price, stop_loss, candidate.side, 3.0), 5),
-        "note": "Bank ~50% at 1.5R, move SL to breakeven, then trail 1R behind the peak (uncapped).",
+        "partial_price": round(partial_target_price, 5),
+        "partial_r": PARTIAL_TARGET_R,
+        "note": (
+            f"Bank ~{int(PARTIAL_FRACTION * 100)}% at {PARTIAL_TARGET_R:g}R, move SL to breakeven, "
+            f"then trail {RUNNER_TRAIL_R:g}R behind the peak (uncapped)."
+        ),
     }
     return {
         "model": "partial_trail",
         # Profile A routes ride 100% to the fixed HTF target (no partial/trail); everything else
-        # uses the standard bank-at-1.5R-then-trail model.
+        # uses the standard bank-at-3R-then-trail model.
         "exit_model": "ride_target" if candidate.route == "HTF_MOMENTUM" else "partial_trail",
         "route": candidate.route,
         "instrument": candidate.instrument,
@@ -1747,7 +1767,7 @@ def _m5_sibling_test(base: dict[str, object]) -> dict[str, object] | None:
             "trail_levels": {
                 "partial_1_5R": round(partial_target, 5),
                 "milestone_3R": round(_target_price(entry_mid, m15_stop, side, 3.0), 5),
-                "note": "M5 variant: deeper mid-zone entry, wide M15 structural stop (room). Bank ~50% at 1.5R, BE after, trail 1R behind peak.",
+                "note": "M5 variant: deeper mid-zone entry, wide M15 structural stop (room). Bank ~50% at 3R, BE after, trail 1R behind peak.",
             },
             "partial_taken": False,
             "partial_time": "",

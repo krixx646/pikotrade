@@ -245,6 +245,9 @@ def _head_prefix(test: dict, rank: int) -> str:
 
 
 PRIME_SESSIONS = ("London/New York overlap", "London", "New York")
+# A trade is only a real WIN/LOSS if it closes beyond this band. Inside +-SCRATCH_R it is a
+# scratch (typically a timeout that marked a hair off breakeven) - not a "win" worth celebrating.
+SCRATCH_R = 0.25
 
 
 def _session_groups(closed: list[dict]) -> dict[str, list[float]]:
@@ -267,9 +270,14 @@ def _stat_str(values: list[float]) -> str:
     n = len(values)
     if n == 0:
         return "0 trades"
-    wins = sum(1 for v in values if v > 0)
+    wins = sum(1 for v in values if v > SCRATCH_R)
+    scratch = sum(1 for v in values if -SCRATCH_R <= v <= SCRATCH_R)
     total = sum(values)
-    return f"{n} trades | win {100 * wins / n:.0f}% | exp {total / n:+.2f}R | total {total:+.2f}R"
+    scratch_text = f" | {scratch} scratch" if scratch else ""
+    return (
+        f"{n} trades | win {100 * wins / n:.0f}% | exp {total / n:+.2f}R | "
+        f"total {total:+.2f}R{scratch_text}"
+    )
 
 
 def _session_breakdown(closed: list[dict]) -> list[str]:
@@ -332,10 +340,10 @@ def _plan_block(test: dict) -> list[str]:
                 + " (more R, smaller stop)"
             )
     if trail:
-        partial = trail.get("partial_1_5R")
-        milestone = trail.get("milestone_3R")
+        partial = trail.get("partial_price", trail.get("partial_1_5R"))
+        partial_r = trail.get("partial_r", 3.0)
         lines.append(
-            f"Trail: partial @ {_fmt_num(partial)} (1.5R), 3R @ {_fmt_num(milestone)}, "
+            f"Trail: bank ~50% @ {_fmt_num(partial)} ({partial_r:g}R), "
             "then trail 1R behind peak (uncapped)"
         )
     pair = str(test.get("pair_value_label", "")).strip()
@@ -367,7 +375,7 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
         head,
         *_decision_lines(test, rank),
         *_plan_block(test),
-        "Manage: bank ~50% at 1.5R, move SL to breakeven, trail the runner.",
+        "Manage: bank ~50% at 3R, move SL to breakeven, trail the runner.",
     ]
     return "\n".join(lines)
 
@@ -376,7 +384,7 @@ def _partial_message(test: dict, tier_label: str, rank: int) -> str:
     prefix = _head_prefix(test, rank)
     head = (
         f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
-        f"{test.get('side', '')} - banked ~50% at 1.5R, SL -> breakeven, runner trailing"
+        f"{test.get('side', '')} - banked ~50% at 3R, SL -> breakeven, runner trailing"
     )
     return "\n".join([head, *_decision_lines(test, rank)])
 
@@ -385,7 +393,14 @@ def _closed_message(test: dict, tier_label: str, rank: int) -> str:
     prefix = _head_prefix(test, rank)
     realized = _float_or_none(test.get("realized_r"))
     realized_text = f"{realized:+.2f}R" if realized is not None else "n/a"
-    tag = "WIN" if (realized is not None and realized > 0) else "LOSS"
+    if realized is None:
+        tag = "CLOSED"
+    elif realized > SCRATCH_R:
+        tag = "WIN"
+    elif realized < -SCRATCH_R:
+        tag = "LOSS"
+    else:
+        tag = "SCRATCH"
     head = (
         f"{prefix}[{tag}][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - closed {test.get('outcome', '')}, realized {realized_text}"
