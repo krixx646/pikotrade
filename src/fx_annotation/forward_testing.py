@@ -142,6 +142,24 @@ class SignalCandidate:
     entry_timeframe: str = "M15"
 
 
+# Per-route max hold (in M15 bars). Intraday scalp routes should resolve within a
+# session; the HTF day-trade routes need room to reach their H1 target. M5 entry
+# variants reuse these counts scaled x3 (M5 has 3 bars per M15 of wall-clock).
+INTRADAY_TIMEOUT_BARS = 20  # ~5h on M15 - MOMENTUM / M15_SIMPLE / DYNAMIC / REGIME / Rule
+HTF_TIMEOUT_BARS = 80       # ~20h on M15 - HTF_MOMENTUM / HTF_ZONE day-trade horizon
+
+
+def _route_timeout_bars(route: str, default_bars: int) -> int:
+    """Max hold (M15 bars) for a route. Day-trade HTF routes get a longer window;
+    intraday routes get a tighter one so stalled trades don't drift into off-hours."""
+    r = str(route or "").upper()
+    if r.startswith("HTF_MOMENTUM") or r.startswith("HTF_ZONE"):
+        return HTF_TIMEOUT_BARS
+    if r.startswith(("MOMENTUM", "M15", "DYNAMIC", "REGIME", "RULE")):
+        return INTRADAY_TIMEOUT_BARS
+    return default_bars  # AI / opportunity / other: keep the global default
+
+
 def run_forward_testing(
     client: OandaClient,
     tests_path: Path = DEFAULT_TESTS_PATH,
@@ -209,6 +227,7 @@ def run_forward_testing(
         if not isinstance(test, dict) or test.get("status") == "closed":
             continue
         instrument = str(test.get("instrument", ""))
+        route_timeout = _route_timeout_bars(str(test.get("route", "")), timeout_bars)
         if test.get("timeframe") == "M5":
             m5c = m5_cache.get(instrument)
             if m5c is None:
@@ -216,7 +235,7 @@ def run_forward_testing(
                 m5_cache[instrument] = m5c
             if not m5c:
                 continue
-            _update_m5_entry_test(test, m5c, timeout_bars * 3, now)
+            _update_m5_entry_test(test, m5c, route_timeout * 3, now)
         else:
             candles = m15_cache.get(instrument)
             if candles is None:
@@ -224,7 +243,7 @@ def run_forward_testing(
                 m15_cache[instrument] = candles
             if not candles:
                 continue
-            _update_test(test, candles, timeout_bars, now)
+            _update_test(test, candles, route_timeout, now)
 
     tests_path.parent.mkdir(parents=True, exist_ok=True)
     tests_path.write_text(json.dumps(tests, indent=2, sort_keys=True), encoding="utf-8")
