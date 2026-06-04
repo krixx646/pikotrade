@@ -224,16 +224,31 @@ def _decision_lines(test: dict, rank: int) -> list[str]:
     if ok:
         lines.append(f"Session: {session_name} \u2705")
     else:
-        lines.append(f"Session: {session_name} \u26A0\uFE0F LOW-QUALITY TIME (outside London/NY)")
+        lines.append(
+            f"Session: {session_name} \u274C LOW-QUALITY TIME (outside London/NY) "
+            "- excluded from headline stats"
+        )
     return lines
+
+
+def _head_prefix(test: dict, rank: int) -> str:
+    """Leading markers for an alert head: a cross for off-hours (bad-session) trades,
+    then the route emoji (rocket/target for the HTF day-trade routes)."""
+    parts: list[str] = []
+    _name, ok = _session_quality(test)
+    if not ok:
+        parts.append("\u274C")  # off-session / low-quality time
+    marker = _route_emoji(rank)
+    if marker:
+        parts.append(marker)
+    return (" ".join(parts) + " ") if parts else ""
 
 
 PRIME_SESSIONS = ("London/New York overlap", "London", "New York")
 
 
-def _session_breakdown(closed: list[dict]) -> list[str]:
-    """Segment closed trades by FX session so performance in prime hours
-    (London / New York / overlap) is reported separately from off-hours (Asian/late-US)."""
+def _session_groups(closed: list[dict]) -> dict[str, list[float]]:
+    """Realized-R lists keyed by FX-session name, for closed trades only."""
     groups: dict[str, list[float]] = {}
     for test in closed:
         realized = _float_or_none(test.get("realized_r"))
@@ -241,16 +256,28 @@ def _session_breakdown(closed: list[dict]) -> list[str]:
             continue
         name, _ok = _session_quality(test)
         groups.setdefault(name, []).append(realized)
+    return groups
 
-    def _stat(values: list[float]) -> str:
-        n = len(values)
-        if n == 0:
-            return "0 trades"
-        wins = sum(1 for v in values if v > 0)
-        total = sum(values)
-        return f"{n} trades | win {100 * wins / n:.0f}% | exp {total / n:+.2f}R | total {total:+.2f}R"
 
-    prime = [v for name in PRIME_SESSIONS for v in groups.get(name, [])]
+def _prime_values(groups: dict[str, list[float]]) -> list[float]:
+    return [v for name in PRIME_SESSIONS for v in groups.get(name, [])]
+
+
+def _stat_str(values: list[float]) -> str:
+    n = len(values)
+    if n == 0:
+        return "0 trades"
+    wins = sum(1 for v in values if v > 0)
+    total = sum(values)
+    return f"{n} trades | win {100 * wins / n:.0f}% | exp {total / n:+.2f}R | total {total:+.2f}R"
+
+
+def _session_breakdown(closed: list[dict]) -> list[str]:
+    """Segment closed trades by FX session so performance in prime hours
+    (London / New York / overlap) is reported separately from off-hours (Asian/late-US)."""
+    groups = _session_groups(closed)
+    _stat = _stat_str
+    prime = _prime_values(groups)
     off_hours = groups.get("off-hours (Asian/late-US)", [])
     unknown = groups.get("unknown", [])
 
@@ -318,8 +345,7 @@ def _plan_block(test: dict) -> list[str]:
 
 
 def _new_signal_message(test: dict, tier_label: str, rank: int) -> str:
-    marker = _route_emoji(rank)
-    prefix = f"{marker} " if marker else ""
+    prefix = _head_prefix(test, rank)
     head = (
         f"{prefix}[NEW][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - setup forming"
@@ -332,8 +358,7 @@ def _new_signal_message(test: dict, tier_label: str, rank: int) -> str:
 
 
 def _entry_message(test: dict, tier_label: str, rank: int) -> str:
-    marker = _route_emoji(rank)
-    prefix = f"{marker} " if marker else ""
+    prefix = _head_prefix(test, rank)
     head = (
         f"{prefix}[FILLED][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - entry filled @ {_fmt_num(test.get('entry_price'))}"
@@ -348,8 +373,7 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
 
 
 def _partial_message(test: dict, tier_label: str, rank: int) -> str:
-    marker = _route_emoji(rank)
-    prefix = f"{marker} " if marker else ""
+    prefix = _head_prefix(test, rank)
     head = (
         f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - banked ~50% at 1.5R, SL -> breakeven, runner trailing"
@@ -358,8 +382,7 @@ def _partial_message(test: dict, tier_label: str, rank: int) -> str:
 
 
 def _closed_message(test: dict, tier_label: str, rank: int) -> str:
-    marker = _route_emoji(rank)
-    prefix = f"{marker} " if marker else ""
+    prefix = _head_prefix(test, rank)
     realized = _float_or_none(test.get("realized_r"))
     realized_text = f"{realized:+.2f}R" if realized is not None else "n/a"
     tag = "WIN" if (realized is not None and realized > 0) else "LOSS"
@@ -389,34 +412,28 @@ def _write_open_trades_md(tests: dict) -> None:
             rank, label = _tier(test.get("route", ""))
             open_tests.append((rank, label, test))
 
-    realized = [r for r in (_float_or_none(t.get("realized_r")) for t in closed) if r is not None]
-    n = len(realized)
-    wins = sum(1 for r in realized if r > 0)
-    total = sum(realized)
+    groups = _session_groups(closed)
+    prime = _prime_values(groups)
 
     lines = [
         "# PikoTrade - Live Open Trades",
         "",
         f"_Auto-refreshed every ~5 minutes. Last update: {datetime.now(timezone.utc).isoformat()}_",
         "",
-        "## Summary",
+        "## Summary (PRIME sessions only - London/NY/overlap)",
         f"- Open now: {len(open_tests)}",
+        f"- Closed (PRIME sessions): {_stat_str(prime)}",
+        "- NOTE: off-hours (Asian/late-US) trades are EXCLUDED from this headline because "
+        "off-session liquidity is thin and has been net-negative. They are still tracked - "
+        "see 'Performance by session' below, or ask explicitly for off-hours results.",
     ]
-    if n:
-        lines.append(
-            f"- Closed (all-time): {n} | win rate {100 * wins / n:.0f}% | "
-            f"expectancy {total / n:+.2f}R | total {total:+.2f}R"
-        )
-    else:
-        lines.append("- Closed (all-time): 0")
     lines += ["", *_session_breakdown(closed)]
     lines += ["", "## Open trades (priority order)", ""]
     if not open_tests:
         lines.append("None right now.")
     else:
         for rank, label, test in sorted(open_tests, key=lambda x: (x[0], str(x[2].get("instrument", "")))):
-            marker = _route_emoji(rank)
-            prefix = f"{marker} " if marker else ""
+            prefix = _head_prefix(test, rank)
             score, conf_label, conf_emoji = _confidence(test, rank)
             session_name, session_ok = _session_quality(test)
             session_text = (
