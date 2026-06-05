@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
         help="Push forward-test signal changes to WhatsApp via the PicoClaw token-free /send endpoint. "
         "Also enabled when PICOTRADE_WHATSAPP_PUSH=1.",
     )
+    parser.add_argument(
+        "--trade-analyst",
+        action="store_true",
+        help="Owner-only AI second-opinion (TAKE/CAUTION/SKIP) on new high-tier trades via Gemini. "
+        "Also enabled when PICOTRADE_TRADE_ANALYST=1.",
+    )
     return parser.parse_args()
 
 
@@ -80,6 +86,8 @@ def run_cycle(args: argparse.Namespace) -> None:
         run_command(["scripts/forward_test_signals.py"])
         if args.whatsapp_push or os.environ.get("PICOTRADE_WHATSAPP_PUSH") == "1":
             run_command(["scripts/whatsapp_push.py"])
+        if args.trade_analyst or os.environ.get("PICOTRADE_TRADE_ANALYST") == "1":
+            run_command(["scripts/trade_analyst.py"])
     run_command(["scripts/export_orchestration_state.py"])
     run_command(["scripts/export_tradingview_pine.py"])
 

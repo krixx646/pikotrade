@@ -30,6 +30,14 @@ from fx_annotation.trade_targets import TradeTarget, available_r
 DEFAULT_TESTS_PATH = PROJECT_ROOT / "outputs" / "forward_tests.json"
 DEFAULT_TESTS_MD_PATH = PROJECT_ROOT / "outputs" / "forward_tests.md"
 DEFAULT_DIAGNOSTICS_PATH = PROJECT_ROOT / "outputs" / "forward_test_diagnostics.json"
+# Shadow "full-target" ledger: the SAME signals, but held to a fixed target with NO trailing/partial,
+# to measure what each trade would have done if it played out fully. Kept in a SEPARATE file and
+# never mixed into the main record, alerts, or stats. Delete-safe (remove these paths + the
+# _full_target_* helpers + the calls in run_forward_testing to drop it entirely).
+DEFAULT_FULL_TARGET_TESTS_PATH = PROJECT_ROOT / "outputs" / "full_target_tests.json"
+DEFAULT_FULL_TARGET_TESTS_MD_PATH = PROJECT_ROOT / "outputs" / "full_target_tests.md"
+# The fixed R target the full-target twin rides to when a signal has no structural target.
+FULL_TARGET_R = 3.0
 DEFAULT_OPENCLAW_TESTS_PATH = Path.home() / ".openclaw" / "workspace" / "memory" / "forex-forward-tests.md"
 DEFAULT_MEMORY_PATHS = {
     "Rule": PROJECT_ROOT / "outputs" / "live_memory.json",
@@ -181,8 +189,12 @@ def run_forward_testing(
     timeout_bars: int = 48,
     max_signal_age_minutes: int = 30,
     track_m5_variant: bool = False,
+    track_full_target: bool = True,
+    full_target_path: Path = DEFAULT_FULL_TARGET_TESTS_PATH,
+    full_target_md_path: Path = DEFAULT_FULL_TARGET_TESTS_MD_PATH,
 ) -> dict[str, object]:
     tests = _load_json(tests_path)
+    full_tests = _load_json(full_target_path) if track_full_target else {}
     diagnostics: list[dict[str, object]] = []
     now_dt = datetime.now(timezone.utc)
     now = now_dt.isoformat()
@@ -229,11 +241,15 @@ def run_forward_testing(
             opportunity_test = _new_test(opportunity, candles, rr_values, now, m5_candles)
             tests[opportunity_key] = opportunity_test
             _maybe_add_m5_sibling(tests, opportunity_test, track_m5_variant)
+            if track_full_target:
+                _add_full_target_twin(full_tests, opportunity_test)
             diagnostics.append(_candidate_diagnostic(opportunity, "opened_opportunity_forward_test"))
             continue
         base_test = _new_test(candidate, candles, rr_values, now, m5_candles)
         tests[key] = base_test
         _maybe_add_m5_sibling(tests, base_test, track_m5_variant)
+        if track_full_target:
+            _add_full_target_twin(full_tests, base_test)
         diagnostics.append(_candidate_diagnostic(candidate, "opened_forward_test"))
 
     m15_cache: dict[str, list[Candle]] = {}
@@ -259,6 +275,24 @@ def run_forward_testing(
             if not candles:
                 continue
             _update_test(test, candles, route_timeout, now)
+
+    if track_full_target:
+        for key, test in list(full_tests.items()):
+            if not isinstance(test, dict) or test.get("status") == "closed":
+                continue
+            instrument = str(test.get("instrument", ""))
+            route_timeout = _route_timeout_bars(str(test.get("route", "")), timeout_bars)
+            candles = m15_cache.get(instrument)
+            if candles is None:
+                candles = _fetch_m15(client, instrument)
+                m15_cache[instrument] = candles
+            if not candles:
+                continue
+            _update_test(test, candles, route_timeout, now)
+        full_target_path.parent.mkdir(parents=True, exist_ok=True)
+        full_target_path.write_text(json.dumps(full_tests, indent=2, sort_keys=True), encoding="utf-8")
+        full_target_md_path.parent.mkdir(parents=True, exist_ok=True)
+        full_target_md_path.write_text(render_full_target_markdown(full_tests), encoding="utf-8")
 
     tests_path.parent.mkdir(parents=True, exist_ok=True)
     tests_path.write_text(json.dumps(tests, indent=2, sort_keys=True), encoding="utf-8")
@@ -1721,6 +1755,111 @@ def _test_key_for(test: dict[str, object]) -> str:
     """Stable tracking key for an already-built test dict (mirror of _candidate_key)."""
     zone = f"{float(test.get('entry_low', 0.0)):.5f}-{float(test.get('entry_high', 0.0)):.5f}"
     return f"{test.get('route', '')}:{test.get('instrument', '')}:{test.get('side', '')}:{zone}"
+
+
+def _full_target_twin(base_test: dict[str, object]) -> dict[str, object]:
+    """Build the SHADOW full-target twin of a freshly opened trade.
+
+    Same entry/stop/side as the real trade, but exits by riding the full position to a fixed
+    target (no partial, no trailing) so we can see what the trade would have done if it played
+    out fully. The fixed target is the structural target when one exists, otherwise FULL_TARGET_R.
+    Lives in a separate ledger; never alerted, never in the main stats.
+    """
+    twin = json.loads(json.dumps(base_test))  # deep copy of plain JSON dict
+    entry = float(twin.get("entry_price", 0.0))
+    stop = float(twin.get("stop_loss", 0.0))
+    side = str(twin.get("side", ""))
+    structural = _float_or_none(twin.get("trade_target_price"))
+    risk = abs(entry - stop)
+    # Use the structural target only if it offers at least 1R of room in the right direction;
+    # otherwise ride to a clean fixed FULL_TARGET_R.
+    target = structural
+    if structural is not None and risk > 0:
+        struct_r = (structural - entry) / risk if side == "BUY" else (entry - structural) / risk
+        if struct_r < 1.0:
+            target = None
+    if target is None:
+        target = _target_price(entry, stop, side, FULL_TARGET_R)
+    twin["ledger"] = "full_target"
+    twin["model"] = "partial_trail"  # routes to _update_partial_trail_test...
+    twin["exit_model"] = "ride_target"  # ...which then rides to the fixed target, no partial/trail
+    twin["trade_target_price"] = round(target, 5)
+    twin["full_target_r"] = round((target - entry) / risk if side == "BUY" else (entry - target) / risk, 4) if risk > 0 else None
+    # reset runtime state so the twin simulates independently
+    twin["status"] = "waiting_entry"
+    twin["partial_taken"] = False
+    twin["partial_time"] = ""
+    twin["breakeven_active"] = False
+    twin["runner_active"] = False
+    twin["runner_peak"] = None
+    twin["realized_r"] = None
+    twin["runner_exit_r"] = None
+    twin["outcome"] = "open"
+    twin["entry_time"] = ""
+    twin["exit_time"] = ""
+    return twin
+
+
+def _add_full_target_twin(full_tests: dict[str, object], base_test: dict[str, object]) -> None:
+    key = _test_key_for(base_test)
+    if key in full_tests:
+        return
+    full_tests[key] = _full_target_twin(base_test)
+
+
+def _peak_r(test: dict[str, object]) -> float | None:
+    """Max favorable excursion in R reached during the trade (how far it actually ran)."""
+    entry = _float_or_none(test.get("entry_price"))
+    risk = _float_or_none(test.get("risk"))
+    peak = _float_or_none(test.get("runner_peak"))
+    if entry is None or risk is None or risk <= 0 or peak is None:
+        return None
+    side = str(test.get("side", ""))
+    return round((peak - entry) / risk if side == "BUY" else (entry - peak) / risk, 2)
+
+
+def render_full_target_markdown(full_tests: dict[str, object]) -> str:
+    """Standalone report for the shadow full-target ledger (no trailing TP)."""
+    items = [v for v in full_tests.values() if isinstance(v, dict)]
+    closed = [t for t in items if t.get("status") == "closed"]
+    open_t = [t for t in items if t.get("status") != "closed"]
+    realized = [float(t.get("realized_r")) for t in closed if _float_or_none(t.get("realized_r")) is not None]
+    wins = [r for r in realized if r > 0]
+    total = round(sum(realized), 2) if realized else 0.0
+    avg = round(sum(realized) / len(realized), 3) if realized else 0.0
+    win_rate = round(100.0 * len(wins) / len(realized), 1) if realized else 0.0
+
+    lines = [
+        "# Full-Target Ledger (shadow / reference only)",
+        "",
+        "Same signals as the live forward test, but each trade is held to a FIXED target with",
+        "**no trailing and no partial** - to show what a trade would have done if it played out",
+        "fully. This is a SEPARATE record: it is **not** part of the main stats or alerts.",
+        "",
+        "## Summary",
+        f"- Closed: {len(closed)} | Open: {len(open_t)}",
+        f"- Win rate (full target hit or net-positive): {win_rate}% ({len(wins)}/{len(realized)})",
+        f"- Total R: {total:+.2f} | Avg R/trade: {avg:+.3f}",
+        f"- Fixed target: structural when available, else {FULL_TARGET_R:g}R",
+        "",
+        "## Recent closed (full-target outcomes)",
+        "",
+    ]
+    if not closed:
+        lines.append("No closed full-target trades yet.")
+    else:
+        for t in sorted(closed, key=lambda x: str(x.get("exit_time", "")))[-30:]:
+            r = _float_or_none(t.get("realized_r"))
+            peak = _peak_r(t)
+            ftr = _float_or_none(t.get("full_target_r"))
+            lines.append(
+                f"- `{t.get('instrument','')}` {t.get('route','')} {t.get('side','')}: "
+                f"{t.get('outcome','')} {('%+.2fR' % r) if r is not None else 'n/a'}"
+                + (f" (target {ftr:g}R)" if ftr is not None else "")
+                + (f", peaked {peak:+.2f}R" if peak is not None else "")
+            )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _m5_sibling_test(base: dict[str, object]) -> dict[str, object] | None:

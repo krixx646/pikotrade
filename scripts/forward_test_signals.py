@@ -52,6 +52,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Deprecated/no-op (M5 variants are off by default). Kept for backward compatibility.",
     )
+    parser.add_argument(
+        "--no-full-target",
+        action="store_true",
+        help="Disable the shadow full-target ledger (same signals held to a fixed target, no "
+        "trailing). It is a separate record (outputs/full_target_tests.*), never in the main stats.",
+    )
     return parser.parse_args()
 
 
@@ -68,6 +74,7 @@ def main() -> int:
         timeout_bars=args.timeout_bars,
         max_signal_age_minutes=args.max_signal_age_minutes,
         track_m5_variant=args.m5_variant and not args.no_m5_variant,
+        track_full_target=not args.no_full_target,
     )
     print(f"Forward tests tracked: {len(tests)}")
     print(f"JSON: {args.tests_output}")
