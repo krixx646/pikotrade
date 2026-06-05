@@ -1639,6 +1639,9 @@ def _new_test(
     entry_price = _entry_price(candidate)
     stop_loss = _stop_loss(candidate, candles)
     risk = abs(entry_price - stop_loss)
+    # Market price when the signal formed - lets the alert classify the pending order as a
+    # limit (entry beyond price, i.e. a pullback) vs a stop (entry through price, i.e. a breakout).
+    ref_price = round(float(candles[-1].close), 5) if candles else None
     room_to_active_extreme_r = _room_to_active_extreme_r(candidate, entry_price, risk)
     pair_value = pair_value_for_instrument(candidate.instrument)
     partial_target_price = _target_price(entry_price, stop_loss, candidate.side, PARTIAL_TARGET_R)
@@ -1676,6 +1679,7 @@ def _new_test(
         "entry_low": candidate.entry_low,
         "entry_high": candidate.entry_high,
         "entry_price": entry_price,
+        "ref_price": ref_price,
         "stop_loss": stop_loss,
         "risk": risk,
         "partial_r": PARTIAL_TARGET_R,

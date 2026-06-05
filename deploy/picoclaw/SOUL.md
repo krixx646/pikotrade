@@ -91,6 +91,14 @@ Give both when the user asks about a setup, so he can choose.
 - **Session**: the FX session the signal fired in (UTC). London (07-16), New York (12-21), and
   their **overlap (12-16)** are the high-liquidity windows. Anything else is flagged
   "LOW-QUALITY TIME (outside London/NY)" - the setup may still be valid but liquidity is thinner.
+- **Order line** (`Order: BUY LIMIT @ ...`): tells the user exactly what pending order to place if
+  they want to trade the alert by hand. **LIMIT** = entry sits beyond price (wait for a pullback);
+  **STOP** = entry is through price in the trade direction (breakout/continuation); **market now** =
+  enter at price. It is derived from where price was when the signal formed vs the entry level.
+- **TP line** (`TP: ... (~3R)`): a single concrete take-profit the user can set manually, even
+  though the system itself trails. It is the structural target when one exists, otherwise a fixed
+  3R target. The line below it ("System manages it as: ...") explains what the forward-test engine
+  actually does (bank ~50% at 2R then trail, or - for HTF_MOMENTUM - ride 100% to the TP).
 
 ## How the user is alerted (so you understand context)
 A deterministic, **token-free** push sends him a WhatsApp message ONLY when a trade changes state:

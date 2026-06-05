@@ -331,49 +331,102 @@ def _session_breakdown(closed: list[dict]) -> list[str]:
     return lines
 
 
+def _rr_price(test: dict, r_mult: float) -> float | None:
+    """Price at r_mult R from entry, on the profit side (for a concrete TP)."""
+    entry = _float_or_none(test.get("entry_price"))
+    stop = _float_or_none(test.get("stop_loss"))
+    side = str(test.get("side", "")).upper()
+    if entry is None or stop is None:
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    return entry + r_mult * risk if side == "BUY" else entry - r_mult * risk
+
+
+def _order_type(test: dict) -> str:
+    """Classify the pending order so the user can log it: buy/sell limit vs stop vs market.
+
+    limit  = entry sits beyond current price in the pullback direction (wait for a retrace).
+    stop   = entry is through current price in the trade direction (breakout/continuation).
+    market = entry is essentially at the current price.
+    Uses ref_price (market price when the signal formed). Falls back to LIMIT, since these
+    are predominantly pullback-into-zone entries, when ref_price is absent (older trades)."""
+    side = str(test.get("side", "")).upper()
+    entry = _float_or_none(test.get("entry_price"))
+    ref = _float_or_none(test.get("ref_price"))
+    stop = _float_or_none(test.get("stop_loss"))
+    if side not in ("BUY", "SELL") or entry is None:
+        return side or "?"
+    if ref is None:
+        return f"{side} LIMIT"
+    tol = abs(entry - stop) * 0.05 if stop is not None else 0.0
+    if side == "BUY":
+        if entry < ref - tol:
+            return "BUY LIMIT"
+        if entry > ref + tol:
+            return "BUY STOP"
+        return "BUY (market now)"
+    if entry > ref + tol:
+        return "SELL LIMIT"
+    if entry < ref - tol:
+        return "SELL STOP"
+    return "SELL (market now)"
+
+
+def _tp_line(test: dict) -> str:
+    """A concrete take-profit the user can set if trading the alert manually.
+
+    Prefers the structural target; otherwise a fixed target at the route's available R
+    (default 3R). Always a real price, never "open-ended"."""
+    target = _float_or_none(test.get("trade_target_price"))
+    tf = str(test.get("trade_target_timeframe", "")).strip()
+    m15_rr = test.get("m15_rr_to_target")
+    if target is not None:
+        rtxt = f" ~{m15_rr}R" if m15_rr is not None else ""
+        ttxt = f" ({tf})" if tf and tf != "fixed" else ""
+        return f"TP: {_fmt_num(target)}{ttxt}{rtxt}"
+    avail = _float_or_none(test.get("available_r")) or 3.0
+    tp = _rr_price(test, avail)
+    return f"TP: {_fmt_num(tp)} (~{avail:g}R)" if tp is not None else "TP: (set at 3R)"
+
+
 def _plan_block(test: dict) -> list[str]:
-    """The full dual-timeframe trade plan, mirroring the OpenClaw forward-test report:
-    entry zone, M15 plan, tighter M5 plan, and the trailing-TP milestones."""
+    """Actionable order ticket for the user: order type, entry, SL, a concrete TP, plus the
+    system's own bank-and-trail management and the tighter M5 option when present."""
     entry = _fmt_num(test.get("entry_price"))
     sl = _fmt_num(test.get("stop_loss"))
     entry_low = test.get("entry_low")
     entry_high = test.get("entry_high")
-    target = _float_or_none(test.get("trade_target_price"))
-    tf = test.get("trade_target_timeframe", "")
-    m15_rr = test.get("m15_rr_to_target")
     m5_sl = test.get("m5_stop_loss")
     m5_rr = test.get("m5_rr_to_target")
     trail = test.get("trail_levels") if isinstance(test.get("trail_levels"), dict) else {}
-
-    tp_text = f"{_fmt_num(target)} ({tf})" if target is not None else "trail / open-ended"
+    order = _order_type(test)
     is_m5_variant = str(test.get("timeframe")) == "M5" or str(test.get("entry_model")) == "m5_midzone"
+
     lines: list[str] = []
     if entry_low is not None and entry_high is not None:
         lines.append(f"Zone: {_fmt_num(entry_low)} - {_fmt_num(entry_high)}")
     if is_m5_variant:
-        # This row IS the M5 trade: deeper mid-zone entry, wide M15 structural stop.
-        lines.append(
-            f"M5 entry (mid-zone): {entry} | SL {sl} (M15 structure) | TP {tp_text}"
-            + (f" | ~{m15_rr}R" if m15_rr is not None else "")
-            + " (better entry, more R)"
-        )
+        lines.append(f"Order: {order} @ {entry} (M5 mid-zone, M15 structural stop)")
     else:
+        lines.append(f"Order: {order} @ {entry}")
+    lines.append(f"SL: {sl}")
+    lines.append(_tp_line(test))
+    if not is_m5_variant and m5_sl is not None:
         lines.append(
-            f"M15: entry {entry} | SL {sl} | TP {tp_text}"
-            + (f" | ~{m15_rr}R" if m15_rr is not None else "")
+            f"M5 option: tighter SL {_fmt_num(m5_sl)}"
+            + (f" (~{m5_rr}R to TP)" if m5_rr is not None else "")
+            + " - smaller stop, more R"
         )
-        if m5_sl is not None:
-            lines.append(
-                f"M5:  entry {entry} | tighter SL {_fmt_num(m5_sl)}"
-                + (f" | ~{m5_rr}R to same TP" if m5_rr is not None else "")
-                + " (more R, smaller stop)"
-            )
-    if trail:
+    if str(test.get("exit_model")) == "ride_target":
+        lines.append("System manages it as: ride 100% to TP, M15 structural stop (no partial)")
+    elif trail:
         partial = trail.get("partial_price", trail.get("partial_1_5R"))
         partial_r = trail.get("partial_r", 2.0)
         lines.append(
-            f"Trail: bank ~50% @ {_fmt_num(partial)} ({partial_r:g}R), "
-            "then trail 1R behind peak (uncapped)"
+            f"System manages it as: bank ~50% @ {_fmt_num(partial)} ({partial_r:g}R), "
+            "then trail 1R behind peak"
         )
     pair = str(test.get("pair_value_label", "")).strip()
     if pair:
@@ -404,7 +457,6 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
         head,
         *_decision_lines(test, rank),
         *_plan_block(test),
-        "Manage: bank ~50% at 2R, move SL to breakeven, trail the runner.",
     ]
     return "\n".join(lines)
 
