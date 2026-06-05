@@ -35,6 +35,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from fx_annotation.config import load_gemini_config, load_oanda_config
 from fx_annotation.gemini_client import call_gemini_text
 from fx_annotation.oanda_client import OandaClient
+from fx_annotation.trade_score import conviction
 
 import whatsapp_push as wa
 
@@ -110,15 +111,14 @@ def _oanda_context(client: OandaClient, instrument: str) -> dict:
     return ctx
 
 
-def _build_prompt(test: dict, ctx: dict) -> str:
+def _build_note_prompt(test: dict, ctx: dict, verdict: str) -> str:
+    """Gemini is NOT the decision-maker. The deterministic score already decided
+    (TAKE/CAUTION). This asks only for a short plain-English note + key levels."""
     side = test.get("side")
     entry = _float(test.get("entry_price"))
     stop = _float(test.get("stop_loss"))
     target = _float(test.get("trade_target_price"))
     risk = abs(entry - stop) if entry is not None and stop is not None else None
-    avail = _float(test.get("available_r"))
-    rank, tier_label = wa._tier(str(test.get("route", "")))
-    session_name, prime = wa._session_quality(test)
     price = ctx.get("price")
     r_to_target = None
     if price is not None and target is not None and risk:
@@ -126,16 +126,13 @@ def _build_prompt(test: dict, ctx: dict) -> str:
     facts = {
         "instrument": test.get("instrument"),
         "route": test.get("route"),
-        "tier": tier_label,
         "side": side,
         "entry": entry,
         "stop_loss": stop,
         "target": target,
-        "planned_R": avail,
+        "planned_R": _float(test.get("available_r")),
         "current_price": price,
         "R_left_to_target_from_now": r_to_target,
-        "session": session_name,
-        "prime_session": prime,
         "pair_value": test.get("pair_value_label"),
         "h4_trend": ctx.get("h4_trend"),
         "h1_trend": ctx.get("h1_trend"),
@@ -145,21 +142,15 @@ def _build_prompt(test: dict, ctx: dict) -> str:
         "m15_recent_closes": ctx.get("m15_recent"),
     }
     return (
-        "You are a disciplined intraday forex risk manager giving a private second opinion to the "
-        "desk owner on ONE trade the system just found. The strategy is trend-following SMC: only "
-        "trade WITH the higher-timeframe direction, prefer reactions from fresh demand/supply, and "
-        "require clean room to target.\n\n"
-        "Judge whether this specific trade is worth taking. Reward: H4 and H1 agreeing with the trade "
-        "side; price reacting from a sensible level; >=2R clean room to target; prime session "
-        "(London/NY/overlap). Penalize: trading against H4/H1; thin off-hours liquidity; little room "
-        "left to target; price already extended.\n\n"
+        "You are a forex analyst writing a SHORT private note for the desk owner about a trade the "
+        f"system already rated **{verdict}** with its own deterministic score. Do NOT re-decide or "
+        "give your own verdict. Just add plain-English colour: in one or two sentences say what makes "
+        "the trade reasonable (HTF alignment, the level it reacts from, room to target) and the single "
+        "biggest risk. Use the facts; do not invent prices.\n\n"
         f"Trade + market facts (JSON):\n{json.dumps(facts, indent=2)}\n\n"
-        "Return ONE compact JSON object only, no prose outside it:\n"
+        "Return ONE compact JSON object only:\n"
         "{\n"
-        '  "verdict": "TAKE | CAUTION | SKIP",\n'
-        '  "conviction": integer 0-100,\n'
-        '  "reason": "one or two sentences, concrete and chart-facing",\n'
-        '  "risk_note": "the main thing that would invalidate it, one sentence",\n'
+        '  "note": "one or two sentences, concrete and chart-facing",\n'
         '  "key_levels": "support/resistance to watch, short"\n'
         "}\n"
     )
@@ -181,26 +172,25 @@ def _extract_json(raw: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _verdict_message(test: dict, ctx: dict, verdict: dict) -> str:
+def _verdict_message(test: dict, score, note: dict) -> str:
     rank, tier_label = wa._tier(str(test.get("route", "")))
-    v = str(verdict.get("verdict", "CAUTION")).upper()
-    emoji = VERDICT_EMOJI.get(v, "\u26a0\ufe0f")
-    conv = verdict.get("conviction", "?")
+    emoji = VERDICT_EMOJI.get(score.verdict, "\u26a0\ufe0f")
     entry = wa._fmt_num(test.get("entry_price"))
     sl = wa._fmt_num(test.get("stop_loss"))
     tp = wa._fmt_num(test.get("trade_target_price")) if _float(test.get("trade_target_price")) is not None else "3R"
     avail = _float(test.get("available_r"))
-    session_name, prime = wa._session_quality(test)
     lines = [
         "\U0001f9e0 ANALYST (owner only)",
         f"{test.get('instrument','')} {test.get('route','')} {test.get('side','')} - T{rank} {tier_label}",
-        f"Verdict: {v} {emoji} (conviction {conv}/100)",
+        f"Score: {score.score}/100 -> {score.verdict} {emoji}",
+        f"Edge: {', '.join(score.reasons)}",
         f"Plan: entry {entry} | SL {sl} | TP {tp}" + (f" (~{avail:g}R)" if avail else ""),
-        f"Session: {session_name}" + (" (prime)" if prime else " (off-hours)"),
-        f"Why: {str(verdict.get('reason','')).strip() or 'n/a'}",
-        f"Risk: {str(verdict.get('risk_note','')).strip() or 'n/a'}",
+        f"Session: {score.session}" + (" (prime)" if score.prime else " (off-hours)"),
     ]
-    levels = str(verdict.get("key_levels", "")).strip()
+    n = str(note.get("note", "")).strip()
+    if n:
+        lines.append(f"Note: {n}")
+    levels = str(note.get("key_levels", "")).strip()
     if levels:
         lines.append(f"Levels: {levels}")
     return "\n".join(lines)
@@ -256,10 +246,11 @@ def _write_md(verdicts: dict, md_path: Path) -> None:
         "",
     ]
     for v in items[:40]:
+        note = str(v.get("note", "")).strip()
         lines.append(
-            f"- {v.get('analyzed_at','')[:16]} `{v.get('instrument','')}` {v.get('route','')} "
-            f"{v.get('side','')}: **{v.get('verdict','')}** ({v.get('conviction','?')}/100) - "
-            f"{v.get('reason','')}"
+            f"- {str(v.get('analyzed_at',''))[:16]} `{v.get('instrument','')}` {v.get('route','')} "
+            f"{v.get('side','')}: **{v.get('verdict','')}** ({v.get('score','?')}/100)"
+            + (f" - {note}" if note else f" - {v.get('edge','')}")
         )
     lines.append("")
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -292,6 +283,9 @@ def main() -> int:
     max_age_min = float(os.environ.get("PICOTRADE_ANALYST_MAX_AGE_MIN", "60"))
     max_sends = args.limit if args.limit is not None else int(os.environ.get("PICOTRADE_ANALYST_MAX", "3"))
     dry_run = args.dry_run or os.environ.get("PICOTRADE_ANALYST_DRY_RUN") == "1"
+    # Which verdicts get pushed to the owner. The deterministic score is the gate; SKIP is recorded
+    # silently (queryable) and only TAKE/CAUTION are pushed (and only those call Gemini for a note).
+    push_verdicts = {v.strip().upper() for v in os.environ.get("PICOTRADE_ANALYST_PUSH", "TAKE,CAUTION").split(",")}
     owner = _owner()
     md_path = Path(os.path.expanduser(os.environ.get("PICOTRADE_ANALYST_MD", DEFAULT_MD)))
 
@@ -305,49 +299,65 @@ def main() -> int:
     client = OandaClient(load_oanda_config())
     sent = 0
     for key, test in pending:
-        if sent >= max_sends:
-            break
-        ctx = _oanda_context(client, str(test.get("instrument", "")))
-        try:
-            raw = call_gemini_text(gemini, _build_prompt(test, ctx))
-        except Exception as exc:
-            print(f"trade_analyst: Gemini error for {key}: {exc}")
-            continue
-        verdict = _extract_json(raw)
-        if not verdict.get("verdict"):
-            print(f"trade_analyst: unparseable verdict for {key}; skipping.")
-            continue
-        message = _verdict_message(test, ctx, verdict)
-        delivered = True
-        if dry_run:
-            print("--- DRY RUN ---")
-            print(message)
-        else:
-            delivered = wa._send_one(message, owner)
-        if not delivered:
-            print(f"trade_analyst: send failed for {key}; will retry next run.")
-            continue
+        # 1) Deterministic, backtested gate decides the verdict (no LLM in the decision).
+        score = conviction(
+            str(test.get("route", "")),
+            str(test.get("instrument", "")),
+            str(test.get("signal_time") or test.get("created_at") or ""),
+            _float(test.get("available_r")),
+            str(test.get("pair_value_tier") or "") or None,
+        )
         now = datetime.now(timezone.utc).isoformat()
-        analyzed[key] = now
-        verdicts[key] = {
+        record = {
             "instrument": test.get("instrument"),
             "route": test.get("route"),
             "side": test.get("side"),
-            "verdict": str(verdict.get("verdict", "")).upper(),
-            "conviction": verdict.get("conviction"),
-            "reason": str(verdict.get("reason", "")).strip(),
-            "risk_note": str(verdict.get("risk_note", "")).strip(),
-            "key_levels": str(verdict.get("key_levels", "")).strip(),
+            "verdict": score.verdict,
+            "score": score.score,
+            "session": score.session,
+            "prime": score.prime,
+            "edge": ", ".join(score.reasons),
+            "note": "",
+            "key_levels": "",
             "analyzed_at": now,
         }
+
+        if score.verdict not in push_verdicts:
+            # SKIP (or filtered): record silently, no push, no Gemini spend.
+            verdicts[key] = record
+            analyzed[key] = now
+            continue
+
+        if sent >= max_sends:
+            continue  # defer remaining pushes (and their Gemini calls) to the next run
+
+        # 2) Trade passed the gate -> Gemini writes only the plain-English note (optional, best-effort).
+        ctx = _oanda_context(client, str(test.get("instrument", "")))
+        note: dict = {}
+        try:
+            note = _extract_json(call_gemini_text(gemini, _build_note_prompt(test, ctx, score.verdict)))
+        except Exception as exc:
+            print(f"trade_analyst: Gemini note error for {key} (sending without note): {exc}")
+        record["note"] = str(note.get("note", "")).strip()
+        record["key_levels"] = str(note.get("key_levels", "")).strip()
+
+        message = _verdict_message(test, score, note)
+        if dry_run:
+            print("--- DRY RUN ---")
+            print(message)
+        elif not wa._send_one(message, owner):
+            print(f"trade_analyst: send failed for {key}; will retry next run.")
+            continue
+        verdicts[key] = record
+        analyzed[key] = now
         sent += 1
 
     state["analyzed"] = analyzed
     _save_json(STATE_PATH, state)
     _save_json(VERDICTS_PATH, verdicts)
     _write_md(verdicts, md_path)
-    print(f"trade_analyst: {sent} verdict(s) {'printed' if dry_run else 'sent to owner'}, "
-          f"{len(pending)} pending candidate(s).")
+    print(f"trade_analyst: {sent} verdict(s) {'printed' if dry_run else 'pushed to owner'}, "
+          f"{len(pending)} fresh candidate(s) evaluated.")
     return 0
 
 
