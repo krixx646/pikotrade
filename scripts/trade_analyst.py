@@ -14,6 +14,7 @@ this file and the one call in run_always_on.run_cycle.
 Config (environment variables, all optional):
   PICOTRADE_ANALYST_OWNER     owner JID (default: first whatsapp_push recipient)
   PICOTRADE_ANALYST_MIN_TIER  default 3 (analyze tier <= this; 1 HTF-MOM, 2 HTF-ZONE, 3 PREMIUM)
+  PICOTRADE_ANALYST_MAX_AGE_MIN  default 60 (only analyze freshly found trades, not the backlog)
   PICOTRADE_ANALYST_MAX       default 3 (verdicts per run; rest deferred to next run)
   PICOTRADE_ANALYST_MD        default ~/.picoclaw/workspace/memory/TRADE_VERDICTS.md
   PICOTRADE_ANALYST_DRY_RUN   set to 1 to print instead of sending (or pass --dry-run)
@@ -205,7 +206,20 @@ def _verdict_message(test: dict, ctx: dict, verdict: dict) -> str:
     return "\n".join(lines)
 
 
-def _is_tradeable(test: dict, min_tier: int) -> bool:
+def _age_minutes(test: dict) -> float | None:
+    raw = str(test.get("created_at", "")).strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
+def _is_tradeable(test: dict, min_tier: int, max_age_min: float) -> bool:
     if not isinstance(test, dict):
         return False
     if test.get("ledger") == "full_target":
@@ -213,6 +227,10 @@ def _is_tradeable(test: dict, min_tier: int) -> bool:
     if str(test.get("status")) not in ("waiting_entry", "active"):
         return False
     if str(test.get("timeframe")) == "M5":
+        return False
+    # Only weigh in on freshly found trades, not the historical backlog of open trades.
+    age = _age_minutes(test)
+    if age is None or age > max_age_min:
         return False
     rank, _ = wa._tier(str(test.get("route", "")))
     return rank <= min_tier
@@ -271,6 +289,7 @@ def main() -> int:
     verdicts = _load_json(VERDICTS_PATH)
 
     min_tier = int(os.environ.get("PICOTRADE_ANALYST_MIN_TIER", "3"))
+    max_age_min = float(os.environ.get("PICOTRADE_ANALYST_MAX_AGE_MIN", "60"))
     max_sends = args.limit if args.limit is not None else int(os.environ.get("PICOTRADE_ANALYST_MAX", "3"))
     dry_run = args.dry_run or os.environ.get("PICOTRADE_ANALYST_DRY_RUN") == "1"
     owner = _owner()
@@ -279,7 +298,7 @@ def main() -> int:
     pending = [
         (key, test)
         for key, test in tests.items()
-        if key not in analyzed and _is_tradeable(test, min_tier)
+        if key not in analyzed and _is_tradeable(test, min_tier, max_age_min)
     ]
     pending.sort(key=lambda kv: (wa._tier(str(kv[1].get("route", "")))[0], str(kv[1].get("created_at", ""))))
 
