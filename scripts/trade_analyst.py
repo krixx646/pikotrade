@@ -35,7 +35,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from fx_annotation.config import load_gemini_config, load_oanda_config
 from fx_annotation.gemini_client import call_gemini_text
 from fx_annotation.oanda_client import OandaClient
-from fx_annotation.trade_score import conviction
+from fx_annotation.trade_score import band_stats, conviction
 
 import whatsapp_push as wa
 
@@ -187,6 +187,9 @@ def _verdict_message(test: dict, score, note: dict) -> str:
         f"Plan: entry {entry} | SL {sl} | TP {tp}" + (f" (~{avail:g}R)" if avail else ""),
         f"Session: {score.session}" + (" (prime)" if score.prime else " (off-hours)"),
     ]
+    band, wr, ar, n = band_stats(score.score)
+    if n:
+        lines.append(f"History (band {band}): ~{wr:.0f}% win, {ar:+.2f}R/trade avg (n={n}, backtest)")
     n = str(note.get("note", "")).strip()
     if n:
         lines.append(f"Note: {n}")

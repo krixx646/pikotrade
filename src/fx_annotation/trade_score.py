@@ -19,6 +19,66 @@ from fx_annotation.pair_value import pair_value_for_instrument
 TAKE_MIN = 70
 CAUTION_MIN = 55
 
+# Historical per-band outcomes from the flagship filter backtest (MOMENTUM +
+# HTF_MOMENTUM + HTF_ZONE pooled, 1yr, 9 pairs). PURELY INFORMATIONAL context for
+# the analyst note - never used in the decision. Regenerate with:
+#   python scripts/backtest_trade_filter.py --engine flagship
+# Tuple: (lo, hi, win_rate_pct, avg_r_per_trade, sample_n)
+BAND_STATS = (
+    (0, 40, 49.5, -0.171, 777),
+    (40, 55, 53.9, -0.014, 1725),
+    (55, 70, 53.7, 0.126, 1232),
+    (70, 85, 54.3, 0.194, 1840),
+    (85, 101, 39.9, 1.151, 228),
+)
+
+
+def band_stats(score: int) -> tuple[str, float, float, int]:
+    """(band label, historical win-rate %, avg R/trade, sample size) for a score."""
+    for lo, hi, wr, ar, n in BAND_STATS:
+        if lo <= score < hi:
+            return (f"{lo}-{hi - 1}", wr, ar, n)
+    return ("?", 0.0, 0.0, 0)
+
+# Historical context per score band - pooled flagship backtest (MOMENTUM + HTF_MOMENTUM +
+# HTF_ZONE, ~5.8k trades, 1yr, 9 pairs). (lo, hi, win_rate_pct, avg_R_per_trade). Informational
+# only: shows BOTH the comfort side (hit rate) and the payoff side (expectancy) of each band.
+SCORE_BANDS: tuple[tuple[int, int, float, float], ...] = (
+    (0, 40, 49.5, -0.17),
+    (40, 55, 53.9, -0.01),
+    (55, 70, 53.7, 0.13),
+    (70, 85, 54.3, 0.19),
+    (85, 101, 39.9, 1.15),
+)
+
+
+def band_context(score: int) -> str:
+    """One-line historical read for the score's band: '~54% win, +0.19R/trade avg'."""
+    for lo, hi, win, exp in SCORE_BANDS:
+        if lo <= score < hi:
+            return f"~{win:.0f}% win, {exp:+.2f}R/trade avg"
+    return "no historical reference"
+
+# Historical performance per score band, measured by scripts/backtest_trade_filter.py
+# (flagship pool: MOMENTUM + HTF_MOMENTUM + HTF_ZONE, 1yr, 9 pairs). Purely informational
+# context for the owner - (low, high_exclusive, win_rate_pct, expectancy_R). Note the
+# inversion at the top: the 85+ band wins less often but pays the most per trade.
+BAND_HISTORY: tuple[tuple[int, int, float, float], ...] = (
+    (0, 40, 49.5, -0.17),
+    (40, 55, 53.9, -0.01),
+    (55, 70, 53.7, 0.13),
+    (70, 85, 54.3, 0.19),
+    (85, 101, 39.9, 1.15),
+)
+
+
+def band_history(score: int) -> tuple[float, float] | None:
+    """(historical win_rate_pct, expectancy_R) for this score's band, or None."""
+    for lo, hi, wr, exp in BAND_HISTORY:
+        if lo <= score < hi:
+            return (wr, exp)
+    return None
+
 
 @dataclass(frozen=True)
 class TradeScore:
