@@ -35,7 +35,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from fx_annotation.config import load_gemini_config, load_oanda_config
 from fx_annotation.gemini_client import call_gemini_text
 from fx_annotation.oanda_client import OandaClient
-from fx_annotation.trade_score import band_stats, conviction
+from fx_annotation.trade_score import alignment, band_stats, conviction, trend_of
 
 import whatsapp_push as wa
 
@@ -72,17 +72,7 @@ def _float(value: object) -> float | None:
 
 
 def _trend(closes: list[float]) -> str:
-    if len(closes) < 5:
-        return "unclear"
-    first = sum(closes[: max(1, len(closes) // 4)]) / max(1, len(closes) // 4)
-    last = sum(closes[-max(1, len(closes) // 4):]) / max(1, len(closes) // 4)
-    span = max(abs(c) for c in closes) or 1.0
-    diff = (last - first) / span
-    if diff > 0.0008:
-        return "up"
-    if diff < -0.0008:
-        return "down"
-    return "ranging"
+    return trend_of(closes)
 
 
 def _oanda_context(client: OandaClient, instrument: str) -> dict:
@@ -172,7 +162,7 @@ def _extract_json(raw: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _verdict_message(test: dict, score, note: dict) -> str:
+def _verdict_message(test: dict, score, note: dict, ctx: dict | None = None) -> str:
     rank, tier_label = wa._tier(str(test.get("route", "")))
     emoji = VERDICT_EMOJI.get(score.verdict, "\u26a0\ufe0f")
     entry = wa._fmt_num(test.get("entry_price"))
@@ -187,6 +177,9 @@ def _verdict_message(test: dict, score, note: dict) -> str:
         f"Plan: entry {entry} | SL {sl} | TP {tp}" + (f" (~{avail:g}R)" if avail else ""),
         f"Session: {score.session}" + (" (prime)" if score.prime else " (off-hours)"),
     ]
+    if ctx:
+        label, al_emoji, detail = alignment(str(test.get("side", "")), ctx.get("h4_trend"), ctx.get("h1_trend"))
+        lines.append(f"Confirmation: {label} {al_emoji} ({detail})")
     band, wr, ar, n = band_stats(score.score)
     if n:
         lines.append(f"History (band {band}): ~{wr:.0f}% win, {ar:+.2f}R/trade avg (n={n}, backtest)")
@@ -343,8 +336,11 @@ def main() -> int:
             print(f"trade_analyst: Gemini note error for {key} (sending without note): {exc}")
         record["note"] = str(note.get("note", "")).strip()
         record["key_levels"] = str(note.get("key_levels", "")).strip()
+        al_label, _al_emoji, al_detail = alignment(str(test.get("side", "")), ctx.get("h4_trend"), ctx.get("h1_trend"))
+        record["alignment"] = al_label
+        record["alignment_detail"] = al_detail
 
-        message = _verdict_message(test, score, note)
+        message = _verdict_message(test, score, note, ctx)
         if dry_run:
             print("--- DRY RUN ---")
             print(message)

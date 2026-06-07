@@ -184,6 +184,54 @@ def conviction(
     return TradeScore(score=score, verdict=verdict, prime=prime, session=session_name, reasons=tuple(reasons))
 
 
+def trend_of(closes: list[float]) -> str:
+    """Coarse trend label from a close series: compare the first quarter's mean to
+    the last quarter's, normalized. Shared by the live analyst and the backtest so
+    'alignment' means the same thing in both places."""
+    if len(closes) < 5:
+        return "unclear"
+    q = max(1, len(closes) // 4)
+    first = sum(closes[:q]) / q
+    last = sum(closes[-q:]) / q
+    span = max((abs(c) for c in closes), default=1.0) or 1.0
+    diff = (last - first) / span
+    if diff > 0.0008:
+        return "up"
+    if diff < -0.0008:
+        return "down"
+    return "ranging"
+
+
+def _agree(side: str, trend: str) -> int:
+    """+1 trend supports the trade, -1 opposes, 0 neutral."""
+    if trend == "up":
+        return 1 if side == "BUY" else -1
+    if trend == "down":
+        return 1 if side == "SELL" else -1
+    return 0
+
+
+def alignment(side: str, h4_trend: str | None, h1_trend: str | None) -> tuple[str, str, str]:
+    """Owner-only 'will it go my way' read: does the higher-timeframe structure
+    currently back this trade? Returns (label, emoji, detail). Descriptive fact,
+    not a probability claim - verifiable on the chart."""
+    h4 = (h4_trend or "unclear").lower()
+    h1 = (h1_trend or "unclear").lower()
+    a4, a1 = _agree(side, h4), _agree(side, h1)
+    agree = (a4 == 1) + (a1 == 1)
+    against = (a4 == -1) + (a1 == -1)
+    detail = f"H4 {h4}, H1 {h1}"
+    if agree == 2:
+        return ("STRONG", "\u2705", detail)            # both timeframes with you
+    if against == 2 or (against == 1 and agree == 0):
+        return ("COUNTER-TREND", "\u274c", detail)     # structure against you
+    if agree == 1 and against == 1:
+        return ("MIXED", "\u26a0\ufe0f", detail)        # one with, one against
+    if agree == 1:
+        return ("LEAN", "\u2705", detail)               # one with, other neutral
+    return ("NEUTRAL", "\u26a0\ufe0f", detail)          # no clear HTF direction
+
+
 def _parse(value: object) -> datetime | None:
     if not value:
         return None
