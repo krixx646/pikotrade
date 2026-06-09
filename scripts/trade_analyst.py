@@ -35,7 +35,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from fx_annotation.config import load_gemini_config, load_oanda_config
 from fx_annotation.gemini_client import call_gemini_text
 from fx_annotation.oanda_client import OandaClient
-from fx_annotation.trade_score import alignment, band_stats, conviction, trend_of
+from fx_annotation.trade_score import alignment, band_stats, conviction, ltf_confirmation, trend_of
 
 import whatsapp_push as wa
 
@@ -45,6 +45,14 @@ VERDICTS_PATH = PROJECT_ROOT / "outputs" / "trade_verdicts.json"
 DEFAULT_MD = "~/.picoclaw/workspace/memory/TRADE_VERDICTS.md"
 
 VERDICT_EMOJI = {"TAKE": "\u2705", "CAUTION": "\u26a0\ufe0f", "SKIP": "\u274c"}
+
+# M5 micro-validation is backtest-validated on MOMENTUM only (+11pp win when CONFIRMS).
+# HTF_MOMENTUM inverts the signal (pullback entry) — do not apply micro there.
+MICRO_ROUTE = "MOMENTUM"
+
+
+def _use_micro(route: str) -> bool:
+    return str(route or "").upper() == MICRO_ROUTE
 
 
 def _load_json(path: Path) -> dict:
@@ -75,13 +83,14 @@ def _trend(closes: list[float]) -> str:
     return trend_of(closes)
 
 
-def _oanda_context(client: OandaClient, instrument: str) -> dict:
+def _oanda_context(client: OandaClient, instrument: str, *, need_m5: bool = False) -> dict:
     """Compact, robust multi-timeframe snapshot. Never raises."""
     ctx: dict[str, object] = {}
     try:
         h4 = [c for c in client.fetch_candles(instrument, "H4", count=120) if c.complete]
         h1 = [c for c in client.fetch_candles(instrument, "H1", count=180) if c.complete]
         m15 = [c for c in client.fetch_candles(instrument, "M15", count=120) if c.complete]
+        m5 = [c for c in client.fetch_candles(instrument, "M5", count=48) if c.complete] if need_m5 else []
     except Exception:
         return ctx
     if not m15:
@@ -98,6 +107,9 @@ def _oanda_context(client: OandaClient, instrument: str) -> dict:
         ctx["h1_low"] = round(min(c.low for c in h1[-40:]), 5)
         ctx["h1_recent"] = [round(c.close, 5) for c in h1[-8:]]
     ctx["m15_recent"] = [round(c.close, 5) for c in m15[-10:]]
+    if m5:
+        ctx["m5_closes"] = [c.close for c in m5[-30:]]
+        ctx["m5_opens"] = [c.open for c in m5[-30:]]
     return ctx
 
 
@@ -180,6 +192,11 @@ def _verdict_message(test: dict, score, note: dict, ctx: dict | None = None) -> 
     if ctx:
         label, al_emoji, detail = alignment(str(test.get("side", "")), ctx.get("h4_trend"), ctx.get("h1_trend"))
         lines.append(f"Confirmation: {label} {al_emoji} ({detail})")
+        if _use_micro(str(test.get("route", ""))):
+            m5c, m5o = ctx.get("m5_closes"), ctx.get("m5_opens")
+            if m5c and m5o:
+                ml, me, md = ltf_confirmation(str(test.get("side", "")), m5c, m5o)
+                lines.append(f"Micro (M5): {ml} {me} ({md})")
     band, wr, ar, n = band_stats(score.score)
     if n:
         lines.append(f"History (band {band}): ~{wr:.0f}% win, {ar:+.2f}R/trade avg (n={n}, backtest)")
@@ -328,7 +345,7 @@ def main() -> int:
             continue  # defer remaining pushes (and their Gemini calls) to the next run
 
         # 2) Trade passed the gate -> Gemini writes only the plain-English note (optional, best-effort).
-        ctx = _oanda_context(client, str(test.get("instrument", "")))
+        ctx = _oanda_context(client, str(test.get("instrument", "")), need_m5=_use_micro(str(test.get("route", ""))))
         note: dict = {}
         try:
             note = _extract_json(call_gemini_text(gemini, _build_note_prompt(test, ctx, score.verdict)))
@@ -339,6 +356,10 @@ def main() -> int:
         al_label, _al_emoji, al_detail = alignment(str(test.get("side", "")), ctx.get("h4_trend"), ctx.get("h1_trend"))
         record["alignment"] = al_label
         record["alignment_detail"] = al_detail
+        if _use_micro(str(test.get("route", ""))) and ctx.get("m5_closes") and ctx.get("m5_opens"):
+            ltf_label, _lt_e, ltf_detail = ltf_confirmation(str(test.get("side", "")), ctx["m5_closes"], ctx["m5_opens"])
+            record["micro_m5"] = ltf_label
+            record["micro_m5_detail"] = ltf_detail
 
         message = _verdict_message(test, score, note, ctx)
         if dry_run:

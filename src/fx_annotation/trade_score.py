@@ -232,6 +232,37 @@ def alignment(side: str, h4_trend: str | None, h1_trend: str | None) -> tuple[st
     return ("NEUTRAL", "\u26a0\ufe0f", detail)          # no clear HTF direction
 
 
+def ltf_confirmation(
+    side: str,
+    closes: list[float],
+    opens: list[float],
+    drift_lookback: int = 12,
+    pressure_lookback: int = 12,
+) -> tuple[str, str, str]:
+    """Admin-only 'is the alert actually playing out on the micro timeframe right now?'
+
+    Instead of placing thousands of M5 paper-trades, we measure directly what they
+    would reveal: short-term M5 drift in the alert direction + directional pressure
+    (share of recent M5 bars closing the alert's way). CONFIRMS/NEUTRAL/DENIES.
+    Deterministic, no lookahead (caller passes only candles before the signal).
+    """
+    n = min(len(closes), len(opens))
+    if n < 6:
+        return ("UNKNOWN", "\u2753", "not enough M5 data")
+    drift = trend_of(closes[-drift_lookback:])
+    k = min(pressure_lookback, n)
+    bull = sum(1 for o, c in zip(opens[-k:], closes[-k:]) if c > o)
+    frac = bull / k
+    dir_frac = frac if side == "BUY" else (1.0 - frac)
+    a = _agree(side, drift)
+    detail = f"M5 drift {drift}, {dir_frac * 100:.0f}% bars with you"
+    if a == 1 and dir_frac >= 0.55:
+        return ("CONFIRMS", "\u2705", detail)
+    if a == -1 or dir_frac <= 0.40:
+        return ("DENIES", "\u274c", detail)
+    return ("NEUTRAL", "\u26a0\ufe0f", detail)
+
+
 def _parse(value: object) -> datetime | None:
     if not value:
         return None
