@@ -181,9 +181,11 @@ def _verdict_message(test: dict, score, note: dict, ctx: dict | None = None) -> 
     sl = wa._fmt_num(test.get("stop_loss"))
     tp = wa._fmt_num(test.get("trade_target_price")) if _float(test.get("trade_target_price")) is not None else "3R"
     avail = _float(test.get("available_r"))
+    time_lines = wa._time_lines(test, warn_stale=True)
     lines = [
         "\U0001f9e0 ANALYST (owner only)",
         f"{test.get('instrument','')} {test.get('route','')} {test.get('side','')} - T{rank} {tier_label}",
+        *time_lines,
         f"Score: {score.score}/100 -> {score.verdict} {emoji}",
         f"Edge: {', '.join(score.reasons)}",
         f"Plan: entry {entry} | SL {sl} | TP {tp}" + (f" (~{avail:g}R)" if avail else ""),

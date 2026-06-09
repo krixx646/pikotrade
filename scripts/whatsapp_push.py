@@ -27,6 +27,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from urllib import error, request
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -182,6 +183,28 @@ def _parse_dt(value: object) -> datetime | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _signal_dt(test: dict) -> datetime | None:
+    """When the setup was found (prefer signal_time, else created_at)."""
+    return _parse_dt(test.get("signal_time") or test.get("created_at"))
+
+
+def _time_lines(test: dict, *, warn_stale: bool = False) -> list[str]:
+    """Human-readable signal time on every alert. Optionally flag stale setups."""
+    dt = _signal_dt(test)
+    if dt is None:
+        return []
+    wat = dt.astimezone(ZoneInfo("Africa/Lagos"))
+    lines = [f"Time: {dt.strftime('%d %b %Y %H:%M')} UTC ({wat.strftime('%H:%M')} WAT)"]
+    if warn_stale:
+        age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+        limit = float(os.environ.get("PICOTRADE_STALE_MIN", "20") or "20")
+        if age_min > limit:
+            lines.append(
+                f"\u26a0\ufe0f STALE ({int(age_min)} min old) - verify price before entry"
+            )
+    return lines
 
 
 def _session_quality(test: dict) -> tuple[str, bool]:
@@ -440,7 +463,7 @@ def _new_signal_message(test: dict, tier_label: str, rank: int) -> str:
         f"{prefix}[NEW][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - setup forming"
     )
-    lines = [head, *_decision_lines(test, rank), *_plan_block(test)]
+    lines = [head, *_time_lines(test, warn_stale=True), *_decision_lines(test, rank), *_plan_block(test)]
     notes = str(test.get("notes", "")).strip()
     if notes:
         lines.append("note: " + _trim(notes))
@@ -455,6 +478,7 @@ def _entry_message(test: dict, tier_label: str, rank: int) -> str:
     )
     lines = [
         head,
+        *_time_lines(test, warn_stale=True),
         *_decision_lines(test, rank),
         *_plan_block(test),
     ]
@@ -467,7 +491,7 @@ def _partial_message(test: dict, tier_label: str, rank: int) -> str:
         f"{prefix}[PARTIAL][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - banked ~50% at 2R, SL -> breakeven, runner trailing"
     )
-    return "\n".join([head, *_decision_lines(test, rank)])
+    return "\n".join([head, *_time_lines(test), *_decision_lines(test, rank)])
 
 
 def _closed_message(test: dict, tier_label: str, rank: int) -> str:
@@ -486,8 +510,7 @@ def _closed_message(test: dict, tier_label: str, rank: int) -> str:
         f"{prefix}[{tag}][T{rank} {tier_label}] {test.get('instrument', '')} {test.get('route', '')} "
         f"{test.get('side', '')} - closed {test.get('outcome', '')}, realized {realized_text}"
     )
-    # Show the session the trade was taken in so wins/losses can be traced to good vs bad times.
-    return "\n".join([head, *_decision_lines(test, rank)])
+    return "\n".join([head, *_time_lines(test), *_decision_lines(test, rank)])
 
 
 def _write_open_trades_md(tests: dict) -> None:
