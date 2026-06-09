@@ -84,10 +84,12 @@ def run_cycle(args: argparse.Namespace) -> None:
     run_command(["scripts/deliver_alerts.py", "--channel", args.alert_channel])
     if not args.no_forward_test:
         run_command(["scripts/forward_test_signals.py"])
-        if args.whatsapp_push or os.environ.get("PICOTRADE_WHATSAPP_PUSH") == "1":
-            run_command(["scripts/whatsapp_push.py"])
+        # Analyst before push so the owner gets the second opinion when the setup is
+        # first spotted (waiting_entry), not only after a late fill notification.
         if args.trade_analyst or os.environ.get("PICOTRADE_TRADE_ANALYST") == "1":
             run_command(["scripts/trade_analyst.py"])
+        if args.whatsapp_push or os.environ.get("PICOTRADE_WHATSAPP_PUSH") == "1":
+            run_command(["scripts/whatsapp_push.py"])
     run_command(["scripts/export_orchestration_state.py"])
     run_command(["scripts/export_tradingview_pine.py"])
 

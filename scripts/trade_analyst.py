@@ -182,9 +182,12 @@ def _verdict_message(test: dict, score, note: dict, ctx: dict | None = None) -> 
     tp = wa._fmt_num(test.get("trade_target_price")) if _float(test.get("trade_target_price")) is not None else "3R"
     avail = _float(test.get("available_r"))
     time_lines = wa._time_lines(test, warn_stale=True)
+    status = str(test.get("status", ""))
+    phase = "setup forming" if status == "waiting_entry" else ("entry filled" if status == "active" else status)
     lines = [
         "\U0001f9e0 ANALYST (owner only)",
         f"{test.get('instrument','')} {test.get('route','')} {test.get('side','')} - T{rank} {tier_label}",
+        f"Phase: {phase}",
         *time_lines,
         f"Score: {score.score}/100 -> {score.verdict} {emoji}",
         f"Edge: {', '.join(score.reasons)}",
@@ -309,7 +312,15 @@ def main() -> int:
         for key, test in tests.items()
         if key not in analyzed and _is_tradeable(test, min_tier, max_age_min)
     ]
-    pending.sort(key=lambda kv: (wa._tier(str(kv[1].get("route", "")))[0], str(kv[1].get("created_at", ""))))
+    def _priority(item: tuple[str, dict]) -> tuple[int, int, str]:
+        test = item[1]
+        # waiting_entry (setup just spotted) beats active (already filled) so the
+        # owner gets the verdict before/at the same time as the NEW alert, not on fill.
+        status_pri = 0 if str(test.get("status")) == "waiting_entry" else 1
+        rank, _ = wa._tier(str(test.get("route", "")))
+        return (status_pri, rank, str(test.get("created_at", "")))
+
+    pending.sort(key=_priority)
 
     client = OandaClient(load_oanda_config())
     sent = 0
