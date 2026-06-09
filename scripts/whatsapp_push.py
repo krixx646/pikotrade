@@ -190,13 +190,21 @@ def _signal_dt(test: dict) -> datetime | None:
     return _parse_dt(test.get("signal_time") or test.get("created_at"))
 
 
+def _fmt_12(dt: datetime) -> str:
+    """12-hour clock, e.g. '09 Jun 2026 2:45 PM'."""
+    clock = dt.strftime("%I:%M %p")
+    if clock.startswith("0"):
+        clock = clock[1:]
+    return f"{dt.strftime('%d %b %Y')} {clock}"
+
+
 def _time_lines(test: dict, *, warn_stale: bool = False) -> list[str]:
     """Human-readable signal time on every alert. Optionally flag stale setups."""
     dt = _signal_dt(test)
     if dt is None:
         return []
-    wat = dt.astimezone(ZoneInfo("Africa/Lagos"))
-    lines = [f"Time: {dt.strftime('%d %b %Y %H:%M')} UTC ({wat.strftime('%H:%M')} WAT)"]
+    local = dt.astimezone(ZoneInfo("Africa/Lagos"))
+    lines = [f"Time: {_fmt_12(local)}"]
     if warn_stale:
         age_min = (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
         limit = float(os.environ.get("PICOTRADE_STALE_MIN", "20") or "20")
